@@ -34,6 +34,29 @@ TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DRIVE_FOLDER_ID: str = os.getenv("DRIVE_FOLDER_ID", "").strip()
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
+# Optional raw JSON strings for cloud/container deployment (e.g., Render, Railway)
+CREDENTIALS_JSON_CONTENT: str = os.getenv("CREDENTIALS_JSON_CONTENT", "").strip()
+TOKEN_JSON_CONTENT: str = os.getenv("TOKEN_JSON_CONTENT", "").strip()
+
+
+def init_cloud_credentials() -> None:
+    """Restore credentials.json and token.json from environment variables if present."""
+    if CREDENTIALS_JSON_CONTENT and not CREDENTIALS_FILE.exists():
+        try:
+            with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
+                f.write(CREDENTIALS_JSON_CONTENT)
+            logging.getLogger(__name__).info("Wrote credentials.json from CREDENTIALS_JSON_CONTENT env var.")
+        except OSError as exc:
+            logging.getLogger(__name__).error("Failed to write credentials.json from env: %s", exc)
+
+    if TOKEN_JSON_CONTENT and not TOKEN_FILE.exists():
+        try:
+            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+                f.write(TOKEN_JSON_CONTENT)
+            logging.getLogger(__name__).info("Wrote token.json from TOKEN_JSON_CONTENT env var.")
+        except OSError as exc:
+            logging.getLogger(__name__).error("Failed to write token.json from env: %s", exc)
+
 
 def parse_allowed_user_ids(raw_ids: str | None = None) -> Set[int]:
     """Parse comma-separated list of allowed numeric Telegram user IDs."""
@@ -63,6 +86,7 @@ def validate_config(strict: bool = True) -> list[str]:
     Returns:
         List of missing or invalid variable descriptions.
     """
+    init_cloud_credentials()
     errors: list[str] = []
 
     if not TELEGRAM_BOT_TOKEN:
