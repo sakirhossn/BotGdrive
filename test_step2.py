@@ -138,6 +138,57 @@ class TestUploadWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(temp_files), 0, "Temporary file was not cleaned up!")
         self.assertIn("Upload failed", mock_status_msg.edit_text.call_args[0][0])
 
+    async def test_multiple_files_batched_into_single_prompt(self):
+        mock_update = MagicMock()
+        mock_update.effective_user.id = 12345
+        mock_update.callback_query = None
+        mock_message = MagicMock()
+        mock_update.effective_message = mock_message
+        mock_prompt_msg = MagicMock()
+        mock_prompt_msg.message_id = 999
+        mock_prompt_msg.chat_id = 111
+        mock_message.reply_text = AsyncMock(return_value=mock_prompt_msg)
+        mock_context = MagicMock()
+        mock_context.user_data = {}
+        mock_context.bot.edit_message_text = AsyncMock()
+
+        # Doc 1
+        mock_doc1 = MagicMock()
+        mock_doc1.file_id = "doc_1"
+        mock_doc1.file_size = 500
+        mock_doc1.file_name = "doc1.pdf"
+        mock_doc1.mime_type = "application/pdf"
+        mock_message.document = mock_doc1
+        mock_message.photo = None
+        mock_message.video = None
+        mock_message.audio = None
+        mock_message.voice = None
+
+        with patch.object(config, "ALLOWED_USER_IDS", {12345}), \
+             patch("utils.get_user_upload_pref", return_value=(None, None)), \
+             patch.object(drive_service.default_drive_service, "get_metadata", return_value={"name": "Root"}), \
+             patch.object(drive_service.default_drive_service, "list_folders", return_value=[]):
+
+            # Send file 1
+            await handlers.handle_media_upload(mock_update, mock_context)
+            self.assertEqual(len(mock_context.user_data["pending_uploads"]), 1)
+            mock_message.reply_text.assert_awaited_once()
+
+            # Doc 2 arrives
+            mock_doc2 = MagicMock()
+            mock_doc2.file_id = "doc_2"
+            mock_doc2.file_size = 800
+            mock_doc2.file_name = "doc2.pdf"
+            mock_doc2.mime_type = "application/pdf"
+            mock_message.document = mock_doc2
+
+            await handlers.handle_media_upload(mock_update, mock_context)
+            self.assertEqual(len(mock_context.user_data["pending_uploads"]), 2)
+            # reply_text was NOT called again; edit_message_text was called instead
+            self.assertEqual(mock_message.reply_text.await_count, 1)
+            mock_context.bot.edit_message_text.assert_awaited_once()
+            self.assertIn("2 files received", mock_context.bot.edit_message_text.call_args[1]["text"])
+
 
 class TestUserPreferences(unittest.TestCase):
     def test_preferences_save_and_retrieve(self):

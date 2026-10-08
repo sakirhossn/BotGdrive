@@ -60,9 +60,31 @@ def build_upload_folder_keyboard(
     return InlineKeyboardMarkup(buttons)
 
 
+def format_pending_uploads_summary(pending_items: list[dict[str, Any]]) -> str:
+    """Build a clean summary for single or multiple pending files."""
+    count = len(pending_items)
+    total_bytes = sum(item.get("file_size") or 0 for item in pending_items)
+    size_str = utils.format_file_size(total_bytes)
+
+    if count == 1:
+        item = pending_items[0]
+        return (
+            f"📄 <b>{html.escape(item['filename'])}</b>\n"
+            f"📦 {utils.format_file_size(item['file_size'])}"
+        )
+
+    lines = [f"📦 <b>{count} files received</b> (Total: {size_str})\n"]
+    for item in pending_items[:5]:
+        item_size = utils.format_file_size(item.get("file_size"))
+        lines.append(f"• 📄 {html.escape(item['filename'])} <i>({item_size})</i>")
+    if count > 5:
+        lines.append(f"• <i>...and {count - 5} more files</i>")
+    return "\n".join(lines)
+
+
 @restricted
 async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Intercept media messages, validate file size, and prompt for destination folder."""
+    """Intercept media messages, batch multiple files, and prompt for destination folder only once."""
     message = update.effective_message
     user = update.effective_user
     if not message or not user:
@@ -81,7 +103,6 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         filename = utils.sanitize_filename(doc.file_name, default_prefix="doc")
         mime_type = doc.mime_type
     elif message.photo:
-        # Highest resolution photo is last in list
         photo = message.photo[-1]
         file_id = photo.file_id
         file_size = photo.file_size
@@ -121,13 +142,74 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Store pending upload in user session
-    context.user_data["pending_upload"] = {
+    new_item = {
         "file_id": file_id,
         "filename": filename,
         "file_size": file_size,
         "mime_type": mime_type,
     }
+
+    # If pending batch already exists, append to it and refresh existing prompt without sending new messages
+    if "pending_uploads" in context.user_data and context.user_data["pending_uploads"]:
+        context.user_data["pending_uploads"].append(new_item)
+        prompt_msg_id = context.user_data.get("upload_prompt_msg_id")
+        prompt_chat_id = context.user_data.get("upload_prompt_chat_id", message.chat_id)
+        current_fld = context.user_data.get("upload_prompt_folder_id")
+
+        pref_id, pref_name = utils.get_user_upload_pref(user.id)
+        summary_text = format_pending_uploads_summary(context.user_data["pending_uploads"])
+
+        if current_fld and prompt_msg_id:
+            try:
+                current_meta = await asyncio.to_thread(
+                    drive_service.default_drive_service.get_metadata, current_fld
+                )
+                subfolders = await asyncio.to_thread(
+                    drive_service.default_drive_service.list_folders, current_fld
+                )
+                curr_name = current_meta.get("name", "Root Folder")
+                reply_markup = build_upload_folder_keyboard(subfolders, current_fld, curr_name)
+                text = (
+                    f"📤 <b>Files received</b>\n\n"
+                    f"{summary_text}\n\n"
+                    f"Where should I upload them?"
+                )
+                await context.bot.edit_message_text(
+                    text=text,
+                    chat_id=prompt_chat_id,
+                    message_id=prompt_msg_id,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        elif pref_id and pref_name and prompt_msg_id:
+            keyboard = [
+                [InlineKeyboardButton("✅ Upload All Here", callback_data=f"up:sel:{pref_id}")],
+                [InlineKeyboardButton("📂 Choose Another Folder", callback_data="up:choose_other")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="up:cancel")],
+            ]
+            text = (
+                f"📤 <b>Files received</b>\n\n"
+                f"{summary_text}\n\n"
+                f"Upload all to: 📁 <b>{html.escape(pref_name)}</b>?"
+            )
+            try:
+                await context.bot.edit_message_text(
+                    text=text,
+                    chat_id=prompt_chat_id,
+                    message_id=prompt_msg_id,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        return
+
+    # First file in a new batch
+    context.user_data["pending_uploads"] = [new_item]
+    # Maintain single pending_upload for fallback
+    context.user_data["pending_upload"] = new_item
 
     # Check remembered upload folder
     pref_id, pref_name = utils.get_user_upload_pref(user.id)
@@ -137,7 +219,7 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("📂 Choose Another Folder", callback_data="up:choose_other")],
             [InlineKeyboardButton("❌ Cancel", callback_data="up:cancel")],
         ]
-        await message.reply_text(
+        prompt_msg = await message.reply_text(
             f"📤 <b>File received</b>\n\n"
             f"📄 <b>{html.escape(filename or 'file')}</b>\n"
             f"📦 {utils.format_file_size(file_size)}\n\n"
@@ -145,6 +227,9 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML,
         )
+        context.user_data["upload_prompt_msg_id"] = prompt_msg.message_id
+        context.user_data["upload_prompt_chat_id"] = prompt_msg.chat_id
+        context.user_data["upload_prompt_folder_id"] = None
         return
 
     # Otherwise, show folder selection starting at root folder
@@ -156,12 +241,20 @@ async def show_folder_selection(
     context: ContextTypes.DEFAULT_TYPE,
     folder_id: str,
 ) -> None:
-    """Display interactive folder selection for pending upload."""
-    pending = context.user_data.get("pending_upload")
-    if not pending:
+    """Display interactive folder selection for pending upload batch."""
+    pending_items = context.user_data.get("pending_uploads") or []
+    if not pending_items:
+        single = context.user_data.get("pending_upload")
+        if single:
+            pending_items = [single]
+            context.user_data["pending_uploads"] = pending_items
+
+    if not pending_items:
         if update.callback_query:
             await update.callback_query.answer("No pending upload found.", show_alert=True)
         return
+
+    context.user_data["upload_prompt_folder_id"] = folder_id
 
     # Fetch folder details and subfolders in background thread
     try:
@@ -179,12 +272,13 @@ async def show_folder_selection(
 
     current_name = current_meta.get("name", "Root Folder")
     reply_markup = build_upload_folder_keyboard(subfolders, folder_id, current_name)
+    summary_text = format_pending_uploads_summary(pending_items)
 
+    count = len(pending_items)
     text = (
-        f"📤 <b>File received</b>\n\n"
-        f"📄 <b>{html.escape(pending['filename'])}</b>\n"
-        f"📦 {utils.format_file_size(pending['file_size'])}\n\n"
-        f"Where should I upload it?"
+        f"📤 <b>File{'s' if count > 1 else ''} received</b>\n\n"
+        f"{summary_text}\n\n"
+        f"Where should I upload {'them' if count > 1 else 'it'}?"
     )
 
     if update.callback_query and update.callback_query.message:
@@ -193,12 +287,16 @@ async def show_folder_selection(
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML,
         )
+        context.user_data["upload_prompt_msg_id"] = update.callback_query.message.message_id
+        context.user_data["upload_prompt_chat_id"] = update.callback_query.message.chat_id
     elif update.effective_message:
-        await update.effective_message.reply_text(
+        msg = await update.effective_message.reply_text(
             text,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML,
         )
+        context.user_data["upload_prompt_msg_id"] = msg.message_id
+        context.user_data["upload_prompt_chat_id"] = msg.chat_id
 
 
 @restricted
@@ -213,8 +311,13 @@ async def upload_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     if data == "up:cancel":
+        count = len(context.user_data.get("pending_uploads", [])) or 1
+        context.user_data.pop("pending_uploads", None)
         context.user_data.pop("pending_upload", None)
-        await query.message.edit_text("❌ Upload cancelled.")
+        context.user_data.pop("upload_prompt_msg_id", None)
+        context.user_data.pop("upload_prompt_chat_id", None)
+        context.user_data.pop("upload_prompt_folder_id", None)
+        await query.message.edit_text(f"❌ Upload cancelled ({count} file{'s' if count > 1 else ''} discarded).")
         return
 
     if data == "up:choose_other":
@@ -249,85 +352,148 @@ async def execute_upload(
     context: ContextTypes.DEFAULT_TYPE,
     target_folder_id: str,
 ) -> None:
-    """Download pending file from Telegram and upload to Google Drive."""
+    """Download pending files from Telegram and upload to Google Drive in batch."""
     query = update.callback_query
     message = query.message if query else update.effective_message
     user = update.effective_user
     if not message or not user:
         return
 
-    pending = context.user_data.pop("pending_upload", None)
-    if not pending:
+    # Clear prompt tracking
+    context.user_data.pop("upload_prompt_msg_id", None)
+    context.user_data.pop("upload_prompt_chat_id", None)
+    context.user_data.pop("upload_prompt_folder_id", None)
+
+    pending_items = context.user_data.pop("pending_uploads", [])
+    if not pending_items:
+        single = context.user_data.pop("pending_upload", None)
+        if single:
+            pending_items = [single]
+
+    if not pending_items:
         await message.reply_text("❌ No pending upload found. Please send the file again.")
         return
 
-    file_id = pending["file_id"]
-    filename = pending["filename"]
-    file_size = pending["file_size"]
-    mime_type = pending["mime_type"]
-
-    # Show initial progress message
-    status_msg = await message.reply_text("⏳ <b>Uploading...</b>", parse_mode=ParseMode.HTML)
-
-    # Local temporary staging file
-    temp_filename = f"temp_{uuid.uuid4().hex}_{filename}"
-    local_temp_path = config.DOWNLOADS_DIR / temp_filename
-
+    # Fetch target folder metadata
     try:
-        # Download from Telegram
-        tg_file = await context.bot.get_file(file_id)
-        await tg_file.download_to_drive(custom_path=str(local_temp_path))
-
-        # Fetch target folder metadata
         folder_meta = await asyncio.to_thread(
             drive_service.default_drive_service.get_metadata, target_folder_id
         )
         folder_name = folder_meta.get("name", "Drive Folder")
+        folder_link = folder_meta.get("webViewLink") or drive_service.default_drive_service.build_drive_link(target_folder_id)
+    except Exception as exc:
+        logger.error("Failed to fetch folder metadata for upload: %s", exc)
+        await message.reply_text("❌ Target folder not found or accessible.")
+        return
 
-        # Remember this folder for future uploads
-        utils.set_user_upload_pref(user.id, target_folder_id, folder_name)
+    # Remember this folder for future uploads
+    utils.set_user_upload_pref(user.id, target_folder_id, folder_name)
 
-        # Upload to Google Drive (blocking call executed in thread)
-        drive_file = await asyncio.to_thread(
-            drive_service.default_drive_service.upload_file,
-            local_path=local_temp_path,
-            filename=filename,
-            mime_type=mime_type,
-            folder_id=target_folder_id,
-        )
+    total_files = len(pending_items)
+    status_msg = await message.reply_text(
+        f"⏳ <b>Uploading {total_files} file{'s' if total_files > 1 else ''}...</b>",
+        parse_mode=ParseMode.HTML,
+    )
 
-        web_link = drive_file.get("webViewLink") or drive_service.default_drive_service.build_drive_link(drive_file["id"])
-        formatted_size = utils.format_file_size(file_size or drive_file.get("size"))
+    uploaded_files: list[dict[str, Any]] = []
+    failed_files: list[str] = []
 
-        success_text = (
-            f"✅ <b>Uploaded successfully</b>\n\n"
-            f"📄 <b>{html.escape(filename)}</b>\n"
-            f"📁 {html.escape(folder_name)}\n"
-            f"📦 {formatted_size}\n\n"
-            f'🔗 <a href="{web_link}">Open in Drive</a>'
-        )
+    for index, item in enumerate(pending_items, start=1):
+        file_id = item["file_id"]
+        filename = item["filename"]
+        file_size = item["file_size"]
+        mime_type = item["mime_type"]
+
+        if total_files > 1:
+            try:
+                await status_msg.edit_text(
+                    f"⏳ <b>Uploading ({index}/{total_files}):</b> {html.escape(filename)}...",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+
+        # Local temporary staging file
+        temp_filename = f"temp_{uuid.uuid4().hex}_{filename}"
+        local_temp_path = config.DOWNLOADS_DIR / temp_filename
+
+        try:
+            # Download from Telegram
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(custom_path=str(local_temp_path))
+
+            # Upload to Google Drive (blocking call executed in thread)
+            drive_file = await asyncio.to_thread(
+                drive_service.default_drive_service.upload_file,
+                local_path=local_temp_path,
+                filename=filename,
+                mime_type=mime_type,
+                folder_id=target_folder_id,
+            )
+
+            web_link = drive_file.get("webViewLink") or drive_service.default_drive_service.build_drive_link(drive_file["id"])
+            uploaded_files.append({
+                "filename": filename,
+                "size": file_size or drive_file.get("size"),
+                "webViewLink": web_link,
+            })
+
+        except Exception as exc:
+            logger.error("Failed to upload file '%s' to Google Drive: %s", filename, exc)
+            failed_files.append(filename)
+        finally:
+            # Always clean up temporary file in downloads/
+            if local_temp_path.exists():
+                try:
+                    local_temp_path.unlink()
+                except OSError as cleanup_err:
+                    logger.warning("Could not delete temporary file '%s': %s", local_temp_path, cleanup_err)
+
+    # Deliver final upload summary
+    if uploaded_files and not failed_files:
+        if total_files == 1:
+            f = uploaded_files[0]
+            success_text = (
+                f"✅ <b>Uploaded successfully</b>\n\n"
+                f"📄 <b>{html.escape(f['filename'])}</b>\n"
+                f"📁 {html.escape(folder_name)}\n"
+                f"📦 {utils.format_file_size(f['size'])}\n\n"
+                f'🔗 <a href="{f["webViewLink"]}">Open in Drive</a>'
+            )
+        else:
+            total_bytes = sum(f.get("size") or 0 for f in uploaded_files)
+            lines = [
+                f"✅ <b>{len(uploaded_files)} files uploaded successfully</b>\n",
+                f"📁 <b>Destination:</b> {html.escape(folder_name)}",
+                f"📦 <b>Total size:</b> {utils.format_file_size(total_bytes)}\n",
+            ]
+            for f in uploaded_files[:8]:
+                lines.append(f"• 📄 {html.escape(f['filename'])}")
+            if len(uploaded_files) > 8:
+                lines.append(f"• <i>...and {len(uploaded_files) - 8} more files</i>")
+            lines.append(f'\n🔗 <a href="{folder_link}">Open Folder in Drive</a>')
+            success_text = "\n".join(lines)
 
         await status_msg.edit_text(
             success_text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=False,
         )
-
-    except Exception as exc:
-        logger.error("Failed to upload file '%s' to Google Drive: %s", filename, exc)
+    elif uploaded_files and failed_files:
+        lines = [
+            f"⚠️ <b>Uploaded {len(uploaded_files)} of {total_files} files</b>\n",
+            f"📁 <b>Destination:</b> {html.escape(folder_name)}\n",
+            f"❌ <b>Failed ({len(failed_files)}):</b> {', '.join(html.escape(n) for n in failed_files)}",
+            f'\n🔗 <a href="{folder_link}">Open Folder in Drive</a>',
+        ]
+        await status_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    else:
         await status_msg.edit_text(
             "❌ <b>Upload failed</b>\n\n"
-            "I couldn't upload this file to Google Drive.\n"
+            "Could not upload the file(s) to Google Drive.\n"
             "Please try again.",
             parse_mode=ParseMode.HTML,
         )
-    finally:
-        # Always clean up temporary file in downloads/
-        if local_temp_path.exists():
-            try:
-                local_temp_path.unlink()
-            except OSError as cleanup_err:
-                logger.warning("Could not delete temporary file '%s': %s", local_temp_path, cleanup_err)
 
 
 @restricted
@@ -367,15 +533,19 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             new_folder_id = new_folder["id"]
 
-            if for_upload and context.user_data.get("pending_upload"):
+            pending_count = len(context.user_data.get("pending_uploads") or [])
+            if not pending_count and context.user_data.get("pending_upload"):
+                pending_count = 1
+
+            if for_upload and pending_count > 0:
                 keyboard = [
-                    [InlineKeyboardButton("✅ Upload Here", callback_data=f"up:sel:{new_folder_id}")],
+                    [InlineKeyboardButton("✅ Upload Here" if pending_count == 1 else "✅ Upload All Here", callback_data=f"up:sel:{new_folder_id}")],
                     [InlineKeyboardButton("⬅️ Choose Another Folder", callback_data="up:choose_other")],
                     [InlineKeyboardButton("❌ Cancel", callback_data="up:cancel")],
                 ]
                 await message.reply_text(
                     f"✅ <b>Folder created:</b> {html.escape(folder_name)}\n\n"
-                    f"Upload pending file here?",
+                    f"Upload {pending_count} pending file{'s' if pending_count > 1 else ''} here?",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode=ParseMode.HTML,
                 )

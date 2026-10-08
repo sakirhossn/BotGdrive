@@ -134,19 +134,26 @@ python bot.py
 | `/delete` | Open browser to choose files or folders to move to Trash |
 | `/help` | Display command guide and safety information |
 
-### Uploading Files
-- Send any file, document, photo, video, audio, or voice note to the chat.
-- The bot displays file details (name, size) and asks:
+### Uploading Files (Single & Multiple / Batch)
+- **Single File**: Send any document, photo, video, audio, or voice note.
+- **Multiple Files / Albums**: When you send several files or an album at once, the bot **asks only once**! It groups all incoming attachments into a single batch, displays a summary of the files and total size, and lets you select the destination folder with a single click.
+- The bot displays:
   ```text
-  Where should I upload it?
+  📤 3 files received (Total: 4.2 MB)
+
+  • 📄 question-paper.pdf (2.1 MB)
+  • 📄 syllabus.pdf (1.3 MB)
+  • 📄 notes.pdf (800 KB)
+
+  Where should I upload them?
   [📁 Current Folder]
   [📂 Documents]
   [📂 Photos]
   [➕ Create New Folder]
   [❌ Cancel]
   ```
-- Once confirmed, the file is uploaded, the temporary file is deleted, and a direct Google Drive link is returned.
-- If you have an active upload destination preference, the bot prompts with `[✅ Upload Here]` for fast 1-click uploads.
+- Once confirmed, the bot uploads each file sequentially with live progress (`⏳ Uploading (1/3)...`), deletes all temporary files, and returns a clean completion summary with a direct link to the folder in Google Drive.
+- If you have an active upload destination preference, the bot prompts with `[✅ Upload All Here]` for immediate 1-click batch upload.
 
 ### Sending Drive Files Back to Telegram
 - Navigate to any file using `/list` or `/search`.
