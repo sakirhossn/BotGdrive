@@ -11,7 +11,7 @@ import html
 import logging
 from typing import Any, Callable
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -185,9 +185,32 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
                 pass
 
 
+async def post_init(application: Application) -> None:
+    """Register bot commands in Telegram UI menu so they appear in autocomplete and menu button."""
+    commands = [
+        BotCommand("start", "Open the main dashboard menu"),
+        BotCommand("list", "Browse files and folders"),
+        BotCommand("folders", "View folder hierarchy"),
+        BotCommand("search", "Search files in Google Drive"),
+        BotCommand("mkdir", "Create a new folder"),
+        BotCommand("delete", "Delete a file or folder to Trash"),
+        BotCommand("help", "Show help and instructions"),
+    ]
+    try:
+        await application.bot.set_my_commands(commands)
+        logger.info("Registered bot commands in Telegram UI menu.")
+    except Exception as exc:
+        logger.warning("Could not set bot commands: %s", exc)
+
+
 def build_application() -> Application:
     """Construct and configure the Telegram Application instance."""
-    app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     # Core commands
     app.add_handler(CommandHandler("start", start_command))
