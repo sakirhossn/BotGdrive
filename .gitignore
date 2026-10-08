@@ -1,0 +1,29 @@
+# Environment configuration and secrets
+.env
+credentials.json
+token.json
+user_prefs.json
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+
+# Runtime downloads directory
+downloads/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
