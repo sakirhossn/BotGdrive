@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import functools
 import html
+import http.server
 import logging
+import os
+import threading
 from typing import Any, Callable
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -255,9 +258,43 @@ def build_application() -> Application:
     return app
 
 
+def start_health_check_server() -> None:
+    """Start a lightweight background HTTP server to satisfy Render/cloud port binding."""
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return
+
+    try:
+        port = int(port_str)
+    except ValueError:
+        return
+
+    class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format: str, *args: Any) -> None:
+            # Suppress noisy health check access logs
+            pass
+
+    try:
+        server = http.server.HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info("Health check server listening on 0.0.0.0:%d for cloud deployment.", port)
+    except Exception as exc:
+        logger.warning("Could not start health check server on port %d: %s", port, exc)
+
+
 def main() -> None:
     """Entrypoint to validate environment and run bot."""
     config.setup_logging()
+
+    # Start health check server if PORT environment variable is present (e.g. Render Web Service)
+    start_health_check_server()
 
     # Validate configuration
     validation_errors = config.validate_config(strict=False)
