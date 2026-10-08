@@ -24,6 +24,7 @@ from telegram.ext import (
 )
 
 import config
+import drive_service
 import handlers
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,22 @@ def main() -> None:
         logger.error("Please configure the missing values in your .env file before starting.")
         return
 
-    logger.info("Starting Telegram Drive Bot...")
+    # Authenticate Google Drive on startup (opens browser on first run if token.json is not present)
+    if config.CREDENTIALS_FILE.exists() or config.TOKEN_FILE.exists():
+        logger.info("Initializing Google Drive authentication...")
+        try:
+            drive_service.default_drive_service.authenticate()
+            logger.info("Google Drive authentication ready.")
+        except Exception as exc:
+            logger.error("Google Drive authentication failed: %s", exc)
+            return
+    else:
+        logger.warning(
+            "credentials.json not found at '%s'. Google Drive features will require credentials.json.",
+            config.CREDENTIALS_FILE,
+        )
+
+    logger.info("Starting Telegram Drive Bot... (Waiting for Telegram messages)")
     app = build_application()
     app.run_polling()
 
