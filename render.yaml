@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: bot-gdrive-2gb
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: LOG_LEVEL
+        value: INFO
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: DRIVE_FOLDER_ID
+        sync: false
+      - key: CREDENTIALS_JSON_CONTENT
+        sync: false
+      - key: TOKEN_JSON_CONTENT
+        sync: false

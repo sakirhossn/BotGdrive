@@ -1,17 +1,15 @@
-"""Google Drive Service API integration.
+"""Google Drive Service API integration with High-Throughput Resumable Uploads.
 
 Handles OAuth 2.0 authentication, token management, file/folder listing,
-metadata retrieval, creation, upload, download, and moving to trash.
-All blocking Google API calls should be invoked with asyncio.to_thread.
+creation, 20 MB chunked resumable upload with live progress, and soft trashing.
 """
 
 from __future__ import annotations
 
 import io
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -23,13 +21,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Full drive scope required to navigate, list pre-existing folders, upload, and trash.
-# Note: drive.file only grants access to files created or opened by this app.
-# If the root folder was created by the user in Drive UI, drive scope is required.
 SCOPES: list[str] = ["https://www.googleapis.com/auth/drive"]
 
-# In-memory cache for folder parent relationships to minimize API calls
-# {folder_id: parent_id or None}
 _parent_cache: Dict[str, Optional[str]] = {}
 
 
@@ -49,9 +42,9 @@ class DriveService:
 
     def authenticate(self) -> Resource:
         """Authenticate with Google OAuth 2.0 and build the Drive resource."""
+        config.restore_cloud_credentials()
         creds: Optional[Credentials] = None
 
-        # Load cached token if available
         if self.token_file.exists():
             try:
                 creds = Credentials.from_authorized_user_file(str(self.token_file), SCOPES)
@@ -59,7 +52,6 @@ class DriveService:
                 logger.warning("Failed to load existing token file: %s", exc)
                 creds = None
 
-        # Refresh or initiate OAuth flow if credentials are not valid
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 logger.info("Refreshing expired Google OAuth access token...")
@@ -73,13 +65,12 @@ class DriveService:
                 if not self.credentials_file.exists():
                     raise FileNotFoundError(
                         f"OAuth client secrets file not found at '{self.credentials_file}'. "
-                        "Please download credentials.json from Google Cloud Console."
+                        "Please provide credentials.json or set CREDENTIALS_JSON_CONTENT in environment."
                     )
-                logger.info("Opening browser for Google OAuth 2.0 authorization...")
+                logger.info("Initiating Google OAuth flow...")
                 flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_file), SCOPES)
                 creds = flow.run_local_server(port=0)
 
-            # Save the refreshed/new token
             try:
                 with open(self.token_file, "w", encoding="utf-8") as token_out:
                     token_out.write(creds.to_json())
@@ -102,7 +93,6 @@ class DriveService:
         meta = self.get_metadata(self.root_folder_id)
         if meta.get("mimeType") != "application/vnd.google-apps.folder":
             raise ValueError(f"Configured DRIVE_FOLDER_ID '{self.root_folder_id}' is not a folder.")
-        # Ensure root has no parent within our boundary cache
         _parent_cache[self.root_folder_id] = None
         return meta
 
@@ -112,11 +102,7 @@ class DriveService:
         return self.service.files().get(fileId=file_id, fields=fields, supportsAllDrives=True).execute()
 
     def is_within_managed_root(self, file_id: str) -> bool:
-        """Verify that a given file or folder is inside the managed root hierarchy.
-
-        Climbs the parent chain up to root_folder_id. Caches parent relationships
-        to minimize API round-trips.
-        """
+        """Verify that a given file or folder is inside the managed root hierarchy."""
         if file_id == self.root_folder_id:
             return True
 
@@ -126,13 +112,11 @@ class DriveService:
         while current_id and current_id not in visited:
             visited.add(current_id)
 
-            # Check cache first
             if current_id in _parent_cache:
                 parent_id = _parent_cache[current_id]
                 if parent_id == self.root_folder_id:
                     return True
                 if parent_id is None:
-                    # Root or orphaned
                     return current_id == self.root_folder_id
                 current_id = parent_id
                 continue
@@ -157,11 +141,7 @@ class DriveService:
         return False
 
     def list_children(self, folder_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """List folders and files directly contained in a folder.
-
-        Returns:
-            (folders, files)
-        """
+        """List folders and files directly contained in a folder."""
         query = f"'{folder_id}' in parents and trashed = false"
         fields = "files(id, name, mimeType, size, modifiedTime, createdTime, parents, webViewLink, trashed)"
 
@@ -189,7 +169,6 @@ class DriveService:
         files: List[Dict[str, Any]] = []
 
         for item in items:
-            # Update parent cache
             _parent_cache[item["id"]] = folder_id
             if item.get("mimeType") == "application/vnd.google-apps.folder":
                 folders.append(item)
@@ -209,14 +188,7 @@ class DriveService:
         return files
 
     def search_files(self, keyword: str, folder_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Search files by name within the managed hierarchy.
-
-        Args:
-            keyword: Substring to search in filenames.
-            folder_id: Target folder or defaults to root_folder_id.
-        """
-        target_root = folder_id or self.root_folder_id
-        # Escape single quotes in keyword
+        """Search files by name within the managed hierarchy."""
         safe_keyword = keyword.replace("'", "\\'")
         query = f"name contains '{safe_keyword}' and mimeType != 'application/vnd.google-apps.folder' and trashed = false"
         fields = "files(id, name, mimeType, size, modifiedTime, createdTime, parents, webViewLink, trashed)"
@@ -231,7 +203,6 @@ class DriveService:
         ).execute()
 
         raw_files = response.get("files", [])
-        # Filter only items within managed root hierarchy
         matched: List[Dict[str, Any]] = []
         for f in raw_files:
             if self.is_within_managed_root(f["id"]):
@@ -239,10 +210,7 @@ class DriveService:
         return matched
 
     def create_folder(self, name: str, parent_id: str) -> Dict[str, Any]:
-        """Create a new folder inside parent_id.
-
-        Validates that parent_id belongs to the managed hierarchy.
-        """
+        """Create a new folder inside parent_id."""
         if not self.is_within_managed_root(parent_id):
             raise PermissionError("Cannot create folder outside the managed root hierarchy.")
 
@@ -267,67 +235,89 @@ class DriveService:
         filename: str,
         mime_type: Optional[str] = None,
         folder_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Dict[str, Any]:
-        """Upload a local file to Google Drive.
+        """Upload a local file to Google Drive with high-throughput 20 MB chunks.
 
         Args:
             local_path: Path to the local file.
             filename: Desired Drive filename.
             mime_type: MIME type of the file.
             folder_id: Destination folder ID (defaults to root_folder_id).
+            progress_callback: Callable(current_bytes, total_bytes) invoked on each chunk.
         """
         target_folder = folder_id or self.root_folder_id
         if not self.is_within_managed_root(target_folder):
             raise PermissionError("Cannot upload to a folder outside the managed root hierarchy.")
 
+        file_size = Path(local_path).stat().st_size
         file_metadata = {
             "name": filename,
             "parents": [target_folder],
         }
 
+        # 20 MB chunk size for maximum throughput on cloud Gigabit networks
+        chunk_size = 20 * 1024 * 1024
         media = MediaFileUpload(
             str(local_path),
             mimetype=mime_type or "application/octet-stream",
+            chunksize=chunk_size,
             resumable=True,
         )
 
-        uploaded = self.service.files().create(
+        request = self.service.files().create(
             body=file_metadata,
             media_body=media,
             fields="id, name, size, mimeType, webViewLink, parents",
             supportsAllDrives=True,
-        ).execute()
+        )
 
-        _parent_cache[uploaded["id"]] = target_folder
-        logger.info("Uploaded file '%s' (id=%s) to folder=%s", filename, uploaded["id"], target_folder)
-        return uploaded
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status and progress_callback:
+                progress_callback(status.resumable_progress, file_size)
 
-    def download_file(self, file_id: str, destination_path: str | Path) -> Path:
-        """Download a file from Google Drive to local destination.
+        if progress_callback:
+            progress_callback(file_size, file_size)
 
-        Verifies that file_id belongs to the managed root hierarchy.
-        """
+        _parent_cache[response["id"]] = target_folder
+        logger.info("Uploaded file '%s' (id=%s, size=%s) to folder=%s", filename, response["id"], file_size, target_folder)
+        return response
+
+    def download_file(
+        self,
+        file_id: str,
+        destination_path: str | Path,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Path:
+        """Download a file from Google Drive to local destination with progress support."""
         if not self.is_within_managed_root(file_id):
             raise PermissionError("Cannot download a file outside the managed root hierarchy.")
+
+        meta = self.get_metadata(file_id)
+        total_size = int(meta.get("size", 0))
 
         dest = Path(destination_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
         with open(dest, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request)
+            downloader = MediaIoBaseDownload(fh, request, chunksize=20 * 1024 * 1024)
             done = False
             while not done:
-                _, done = downloader.next_chunk()
+                status, done = downloader.next_chunk()
+                if status and progress_callback and total_size > 0:
+                    progress_callback(int(status.progress() * total_size), total_size)
+
+        if progress_callback and total_size > 0:
+            progress_callback(total_size, total_size)
 
         logger.info("Downloaded file id=%s to '%s'", file_id, dest)
         return dest
 
     def trash_file(self, file_id: str) -> Dict[str, Any]:
-        """Move a file or folder to Google Drive Trash.
-
-        Never permanently deletes. Rejects if file_id is root_folder_id.
-        """
+        """Move a file or folder to Google Drive Trash (safe soft delete)."""
         if file_id == self.root_folder_id:
             raise PermissionError("The root folder cannot be deleted.")
 
@@ -346,9 +336,8 @@ class DriveService:
         return trashed_item
 
     def build_drive_link(self, file_id: str) -> str:
-        """Build a direct web link for viewing a file or folder in Google Drive."""
+        """Build direct web link to item in Google Drive."""
         return f"https://drive.google.com/file/d/{file_id}/view"
 
 
-# Global singleton instance configured with app settings
 default_drive_service = DriveService()

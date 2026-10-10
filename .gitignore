@@ -3,6 +3,9 @@
 credentials.json
 token.json
 user_prefs.json
+*.session
+*.session-journal
+
 
 # Python bytecode and caches
 __pycache__/

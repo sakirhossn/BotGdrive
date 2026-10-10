@@ -1,244 +1,104 @@
-# 🤖 Telegram → Google Drive File Manager Bot
+# BotGdrive — 2 GB Large-File Telegram to Google Drive Bot
 
-A production-quality, asynchronous Telegram bot in Python for personal Google Drive file and folder management. Enables seamless uploads, interactive folder browsing, hierarchy navigation, search, safe trashing, and sending Drive files directly back to Telegram.
+A high-performance Telegram bot powered by Telegram's native **MTProto protocol** (via Pyrogram), enabling direct file, video, audio, and document uploads of up to **2,000 MB (2 GB)** directly to Google Drive.
 
----
-
-## 🌟 Key Features
-
-- **Asynchronous & Non-Blocking**: Built with `python-telegram-bot` v20+ async architecture. Synchronous Google Drive API calls run in dedicated worker threads (`asyncio.to_thread`), preventing Telegram event loop freezes.
-- **Strict User Authorization**: Whitelist security (`ALLOWED_USER_IDS`). Unauthorized Telegram users cannot execute commands, upload files, or trigger callback buttons.
-- **Drive Boundary Security**: Enforces single-root folder tenancy (`DRIVE_FOLDER_ID`). Every file and folder operation verifies that the target item belongs strictly to the managed hierarchy.
-- **"Where Should I Upload?" Workflow**: Allows choosing destination folders on each upload, creating new folders on the fly, or remembering the last used folder.
-- **Safe Deletions (Trash Only)**: Items are moved to Google Drive Trash (`trashed = true`). Permanent deletion is never executed. The root folder is strictly protected and cannot be deleted.
-- **Media Support & Filename Generation**: Supports documents, high-res photos, videos, audio, and voice messages with intelligent MIME detection and timestamped filenames.
-- **File Size Guards**: Rejects Telegram downloads $> 20\text{ MB}$ upfront. For files $> 50\text{ MB}$, provides a direct Drive web link instead of attempting Telegram sends.
-- **Zero Temporary File Leftovers**: Staging directory `downloads/` cleans up all temporary files inside `finally` blocks.
+Deployable to **Render Free Tier Web Services** for 24/7 background operation with **1 Gbps+ cloud fiber speeds**.
 
 ---
 
-## 📋 Prerequisites
+## 🚀 Key Advantages Over Standard Bot API
 
-- Python 3.10+ (tested on Python 3.13)
-- A Telegram account
-- A Google Cloud Platform (GCP) account
+| Feature | Standard Bot API (Old) | MTProto Protocol (Upgraded) |
+| :--- | :--- | :--- |
+| **Max File Size** | **20 MB hard ceiling** | **2,000 MB (2 GB)** |
+| **Protocol** | HTTP webhook / getUpdates | Native binary MTProto |
+| **Transfer Engine** | Standard HTTP stream | C-accelerated MTProto stream (`tgcrypto`) |
+| **Drive Uploads** | Resumable Upload | Resumable chunked upload (20 MB chunks) |
+| **Progress Reporting** | Basic text | Real-time speed (MB/s), % bar & ETA |
+| **Hosting** | Local PC | **Render Free Tier (24/7 in Cloud)** |
 
 ---
 
-## 🚀 Setup & Installation Guide
+## 🛠 Architecture
 
-### A. Create Your Telegram Bot
-1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
-2. Send `/newbot`.
-3. Choose a friendly name and a unique username ending in `bot` (e.g., `MyPersonalDriveBot`).
-4. BotFather will provide your `TELEGRAM_BOT_TOKEN`.
-5. **Never commit or share this token.**
-
-### B. Find Your Telegram User ID
-1. Open Telegram and search for [@userinfobot](https://t.me/userinfobot) or [@raw_data_bot](https://t.me/raw_data_bot).
-2. Start the bot. It will reply with your numeric ID (e.g., `123456789`).
-3. You will add this ID to `ALLOWED_USER_IDS` in `.env`.
-
-### C. Configure Google Cloud Platform (OAuth 2.0)
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new project (e.g., `Telegram-Drive-Manager`).
-3. Enable the Google Drive API:
-   - Navigate to **APIs & Services** > **Library**.
-   - Search for **Google Drive API** and click **Enable**.
-4. Configure the OAuth Consent Screen:
-   - Navigate to **APIs & Services** > **OAuth consent screen**.
-   - Choose **External** user type and click **Create**.
-   - Enter an App name (e.g., `Telegram Drive Bot`) and your user support email.
-   - Click **Save and Continue** through Scopes.
-   - Under **Test users**, click **Add Users** and enter your personal Google email address.
-   - Click **Save and Continue**.
-5. Create OAuth 2.0 Credentials:
-   - Navigate to **APIs & Services** > **Credentials**.
-   - Click **Create Credentials** > **OAuth client ID**.
-   - Select Application type: **Desktop app**.
-   - Enter a name (e.g., `Drive Bot Desktop Client`) and click **Create**.
-   - Click **Download JSON** on the created client.
-6. Rename the downloaded file to:
-   ```text
-   credentials.json
-   ```
-7. Place `credentials.json` directly in the project root directory beside `bot.py`.
-
-> [!NOTE]
-> **Why `drive` scope is used instead of `drive.file`**:
-> The `drive.file` scope only grants access to files and folders created or opened by the bot itself. If you create your root folder (`DRIVE_FOLDER_ID`) or subfolders directly through the Google Drive web interface, `drive.file` will not be able to list or browse those existing folders. Using `https://www.googleapis.com/auth/drive` enables full management within your managed root folder, while our internal boundary check (`is_within_managed_root`) guarantees that the bot never accesses or modifies files outside your specified `DRIVE_FOLDER_ID`.
-
-### D. Create the Root Drive Folder
-1. Go to [Google Drive](https://drive.google.com/).
-2. Create a folder to serve as the bot's root (e.g., `My Telegram Drive`).
-3. Open the folder. The browser URL will look like:
-   ```text
-   https://drive.google.com/drive/folders/1A2B3C4D5E6F7G8H9I0J_EXAMPLE
-   ```
-4. Copy the alphanumeric string after `folders/` (`1A2B3C4D5E6F7G8H9I0J_EXAMPLE`).
-5. This is your `DRIVE_FOLDER_ID`.
-
-### E. Environment Configuration
-Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
 ```
-(On Windows PowerShell: `Copy-Item .env.example .env`)
-
-Edit `.env` with your values:
-```env
-TELEGRAM_BOT_TOKEN=1234567890:ABCdefGhIJKlmNoPQRsTUVwxyZ
-ALLOWED_USER_IDS=123456789
-DRIVE_FOLDER_ID=1A2B3C4D5E6F7G8H9I0J_EXAMPLE
-LOG_LEVEL=INFO
+[User on Telegram App]
+         │ (Sends file up to 2,000 MB / 2 GB)
+         ▼
+[Telegram MTProto Servers]
+         │ (High-speed MTProto binary stream)
+         ▼
+[Render Cloud Web Service (bot.py)]
+   ├── 🌐 Stdlib HTTP Health Server (Port 10000 - Keeps Render Free Tier active)
+   ├── 📥 C-accelerated Pyrogram MTProto Client
+   └── 🚀 Resumable Chunked Drive Upload (20 MB chunks over 1 Gbps cloud fiber)
+         ▼
+[Google Drive API v3]
+         │
+         ▼
+[Auto-cleanup local temporary file]
+         │
+         ▼
+[Send Confirmation & Direct Drive Link to User]
 ```
-*(Multiple Telegram IDs can be comma-separated, e.g. `ALLOWED_USER_IDS=123456789,987654321`)*
 
-### F. Installation & First Run
+---
 
-#### Windows (PowerShell):
+## 📋 Available Commands
+
+- `/start` — Open main interactive dashboard menu.
+- `/list` or `/browse` — Interactive paginated Google Drive folder and file browser.
+- `/setfolder` — Choose active destination folder for file uploads.
+- `/mkdir <folder_name>` — Create a new folder in Google Drive.
+- `/search <keyword>` — Search for files across Google Drive.
+- `/status` — Verify bot health, MTProto status, and Drive connection.
+- `/help` — Display command guide and large-file upload instructions.
+- `/cancel` — Cancel any active interactive prompt.
+
+---
+
+## ☁️ 1-Click Render Deployment (Free Tier)
+
+### Step 1: Push Code to GitHub
+Ensure this repository is pushed to your GitHub account:
 ```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python bot.py
+git add .
+git commit -m "Upgrade to 2 GB MTProto Bot with Render support"
+git push origin main
 ```
 
-#### Linux / macOS:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python bot.py
-```
-
-#### First Run Authentication Flow:
-1. On the first launch, a browser window will automatically open asking you to sign in with your Google account.
-2. Sign in with the Google email registered under **Test Users**.
-3. If Google displays "Google hasn't verified this app", click **Advanced** $\rightarrow$ **Go to Telegram Drive Bot (unsafe)**.
-4. Click **Continue** to grant Google Drive permissions.
-5. The local OAuth server completes the exchange, saves `token.json` automatically, and the bot starts polling Telegram.
-6. Subsequent runs use `token.json` directly and automatically refresh expired tokens without prompting again.
-
----
-
-### G. 24/7 Free Cloud Deployment (Render.com)
-
-You can run the bot 24/7 in the cloud without keeping your laptop on using [Render.com](https://render.com) (Free Tier):
-
-1. **Push your code to GitHub** (ensure `.env`, `credentials.json`, and `token.json` remain in `.gitignore` and are not committed).
-2. Go to [Render Dashboard](https://dashboard.render.com/) $\rightarrow$ **New +** $\rightarrow$ **Web Service**.
-3. Connect your GitHub repository (`BotGdrive`).
+### Step 2: Create Web Service on Render
+1. Go to **[dashboard.render.com](https://dashboard.render.com)**.
+2. Click **New +** → **Web Service**.
+3. Select your GitHub repository: `sakirhossn/BotGdrive`.
 4. Configure service settings:
-   - **Name**: `botgdrive`
-   - **Environment**: `Python 3`
-   - **Region**: Nearest to you
-   - **Branch**: `main`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `python bot.py`
-   - **Plan**: `Free`
-5. Click **Advanced** $\rightarrow$ **Add Environment Variable** and add:
-   - `TELEGRAM_BOT_TOKEN`: Your Telegram Bot API token
-   - `ALLOWED_USER_IDS`: Your Telegram user ID
-   - `DRIVE_FOLDER_ID`: Your Google Drive managed root folder ID
-   - `LOG_LEVEL`: `INFO`
-   - `CREDENTIALS_JSON_CONTENT`: The entire raw contents of your local `credentials.json` file
-   - `TOKEN_JSON_CONTENT`: The entire raw contents of your local `token.json` file
-6. Click **Create Web Service**. Render will automatically build and start the bot.
+   - **Name:** `botgdrive-2gb`
+   - **Region:** Any (e.g. `Oregon` or `Frankfurt`)
+   - **Branch:** `main`
+   - **Runtime:** `Python 3`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `python bot.py`
+   - **Instance Type:** `Free`
 
-#### ⏰ Keeping Render Awake 24/7 (Preventing 15-Minute Inactivity Sleep)
-On the Render Free Tier, Web Services automatically spin down ("go to sleep") if no inbound HTTP requests arrive within 15 minutes. Because Telegram polling makes *outbound* requests to Telegram, Render does not count them as web activity.
+### Step 3: Add Environment Variables in Render
+In Render's **Environment** tab, add:
 
-To prevent the container from sleeping:
-1. Copy your Render Web Service URL from your Render dashboard (e.g. `https://botgdrive-xxxx.onrender.com`).
-2. Go to a free uptime monitor such as [UptimeRobot](https://uptimerobot.com) or [Cron-job.org](https://cron-job.org).
-3. Create a free HTTP monitor:
-   - **Monitor Type**: `HTTP(s)`
-   - **Friendly Name**: `BotGdrive Keep-Alive`
-   - **URL**: `https://botgdrive-xxxx.onrender.com/`
-   - **Monitoring Interval**: Every 5 or 10 minutes
-4. `bot.py` has a built-in health-check HTTP server that responds `200 OK`. Every ping resets Render's 15-minute timer, keeping your bot continuously active 24/7!
+| Key | Value | Description |
+| :--- | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | `8949801992:AAFd...` | From @BotFather |
+| `TELEGRAM_API_ID` | `35339657` | From my.telegram.org |
+| `TELEGRAM_API_HASH` | `85b4961d02f3e793feb19b4b8a48b62b` | From my.telegram.org |
+| `ALLOWED_USER_IDS` | `880480016` | Your Telegram User ID |
+| `DRIVE_FOLDER_ID` | `1f5p2OJb_EUq0PeAJO0JvXri0zAJeTov7` | Target Drive Folder ID |
+| `CREDENTIALS_JSON_CONTENT` | *(contents of credentials.json)* | Entire JSON file copied as text |
+| `TOKEN_JSON_CONTENT` | *(contents of token.json)* | Entire JSON file copied as text |
+| `PYTHON_VERSION` | `3.11.9` | Recommended Python version |
 
-> [!WARNING]
-> **Avoid 409 Conflict Errors**: Never run `python bot.py` locally on your laptop at the same time while Render is running. Telegram only allows ONE active polling connection per bot token. If both run simultaneously, Telegram terminates polling with a `409 Conflict` error.
+5. Click **Deploy Web Service**! Render will install `tgcrypto`, run the bot, pass health checks, and start streaming files up to 2 GB 24/7!
 
 ---
 
-## 🕹 Usage & Commands
-
-| Command | Description |
-| :--- | :--- |
-| `/start` | Open the interactive main dashboard menu |
-| `/list` | Browse files and folders in the current directory |
-| `/folders` | Alias for `/list` to inspect folder hierarchy |
-| `/mkdir <folder name>` | Create a new folder inside the current directory |
-| `/search <keyword>` | Search files by name inside the managed Drive folder |
-| `/delete` | Open browser to choose files or folders to move to Trash |
-| `/help` | Display command guide and safety information |
-
-### Uploading Files (Single & Multiple / Batch)
-- **Single File**: Send any document, photo, video, audio, or voice note.
-- **Multiple Files / Albums**: When you send several files or an album at once, the bot **asks only once**! It groups all incoming attachments into a single batch, displays a summary of the files and total size, and lets you select the destination folder with a single click.
-- The bot displays:
-  ```text
-  📤 3 files received (Total: 4.2 MB)
-
-  • 📄 question-paper.pdf (2.1 MB)
-  • 📄 syllabus.pdf (1.3 MB)
-  • 📄 notes.pdf (800 KB)
-
-  Where should I upload them?
-  [📁 Current Folder]
-  [📂 Documents]
-  [📂 Photos]
-  [➕ Create New Folder]
-  [❌ Cancel]
-  ```
-- Once confirmed, the bot uploads each file sequentially with live progress (`⏳ Uploading (1/3)...`), deletes all temporary files, and returns a clean completion summary with a direct link to the folder in Google Drive.
-- If you have an active upload destination preference, the bot prompts with `[✅ Upload All Here]` for immediate 1-click batch upload.
-
-### Sending Drive Files Back to Telegram
-- Navigate to any file using `/list` or `/search`.
-- Click the file button to view **File Details** (name, size, MIME type, upload date, folder).
-- Click `[📤 Send File Here]`. If the file is $\le 50\text{ MB}$, the bot downloads it and sends it directly to your Telegram chat. If $> 50\text{ MB}$, it provides the direct Drive link.
-
----
-
-## 🔒 Security Architecture
-
-1. **Telegram Whitelist Authorization**: Every command, message handler, and callback query independently inspects `update.effective_user.id`. Unauthorized users receive `❌ Not authorized.` and execution halts immediately.
-2. **Managed Hierarchy Boundary Guard (`is_within_managed_root`)**: Climbs the parent tree of any targeted file or folder up to `DRIVE_FOLDER_ID`. Prevents attackers from forging callback data to access, trash, or download arbitrary Google Drive files outside the root directory.
-3. **Root Folder Protection**: The root folder cannot be deleted. Any attempt to trash `DRIVE_FOLDER_ID` is rejected at both the UI and service layer.
-4. **Permanent Deletion Disabled**: Deletions exclusively move items to Google Drive Trash (`trashed = true`). Files are never permanently purged by the bot.
-5. **Private by Default**: Files and folders are never made public.
-6. **No Secret Leaks**: Logging is strictly sanitized. Access tokens, refresh tokens, bot tokens, and file binary contents are never logged.
-
----
-
-## 🛠 Troubleshooting
-
-| Problem | Cause & Solution |
-| :--- | :--- |
-| `credentials.json not found` | Download OAuth client JSON from GCP Console, rename to `credentials.json`, and place in the project root beside `bot.py`. |
-| `Access blocked: authorization error (403)` | Your Google account is not added as a **Test User** in the OAuth Consent Screen. Go to GCP Console $\rightarrow$ APIs & Services $\rightarrow$ OAuth consent screen $\rightarrow$ Add Test Users. |
-| `Google Drive API has not been used... (403)` | Google Drive API is disabled. Go to GCP Console $\rightarrow$ APIs & Services $\rightarrow$ Library $\rightarrow$ Google Drive API $\rightarrow$ Enable. |
-| `DRIVE_FOLDER_ID is not a folder` | The ID in `.env` is either invalid or points to a file instead of a folder. Verify the ID from your Google Drive URL. |
-| `❌ File too large` | Telegram Bot API allows bots to download files only up to 20 MB. Larger files must be uploaded via the Drive web UI. |
-| `📦 This file is larger than Telegram's send limit` | Telegram allows bots to send documents up to 50 MB. The bot provides a direct Drive link instead. |
-| `token.json` expired or invalid | Delete `token.json` and restart `python bot.py` to trigger a clean OAuth browser authorization. |
-| `Bot stops responding after ~15 minutes on Render` | Render Free Web Services sleep after 15 minutes of no inbound web traffic. Set up a free HTTP ping on [UptimeRobot](https://uptimerobot.com) to ping your Render URL every 5–10 minutes. |
-| `409 Conflict: terminated by other getUpdates request` | Two bot instances are polling Telegram simultaneously with the same token. Stop the local bot on your laptop (`Ctrl + C`) if Render is running. |
-
----
-
-## 🧪 Running Unit Tests
-
-Run the full offline test suite across all 4 stages:
-```bash
-python -m unittest discover -p "test_step*.py"
-```
-Output:
-```text
-Ran 36 tests in 0.778s
-OK
-```
+## 🔒 Security & Boundaries
+- **Whitelist Protection**: Every incoming message and callback is strictly validated against `ALLOWED_USER_IDS`.
+- **Drive Boundary Isolation**: Operations are restricted strictly within `DRIVE_FOLDER_ID`.
+- **Stateless Cleanup**: Temporary chunks are purged immediately from storage once confirmed by Drive.

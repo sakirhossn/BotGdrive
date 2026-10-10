@@ -1,7 +1,6 @@
-"""Configuration management and environment validation.
+"""Configuration management for BotGdrive (2 GB MTProto Large-File Bot).
 
-Loads and validates settings from environment variables or .env file.
-Ensures zero hardcoded secrets and enforces strict user access control.
+Supports local development and Render/cloud environment credential restoration.
 """
 
 from __future__ import annotations
@@ -17,108 +16,97 @@ from dotenv import load_dotenv
 BASE_DIR: Path = Path(__file__).resolve().parent
 ENV_PATH: Path = BASE_DIR / ".env"
 
-# Load .env if present
 if ENV_PATH.exists():
     load_dotenv(dotenv_path=ENV_PATH)
 else:
     load_dotenv()
 
-# File paths
+# Google Drive credentials
 CREDENTIALS_FILE: Path = BASE_DIR / "credentials.json"
 TOKEN_FILE: Path = BASE_DIR / "token.json"
 DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
-USER_PREFS_FILE: Path = BASE_DIR / "user_prefs.json"
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Telegram and Drive configs
+
+def restore_cloud_credentials() -> None:
+    """Auto-restore credentials from environment variables for Render/cloud deployment."""
+    creds_content = os.getenv("CREDENTIALS_JSON_CONTENT", "").strip()
+    if creds_content and not CREDENTIALS_FILE.exists():
+        try:
+            CREDENTIALS_FILE.write_text(creds_content, encoding="utf-8")
+            logging.getLogger(__name__).info("Restored credentials.json from CREDENTIALS_JSON_CONTENT.")
+        except Exception as exc:
+            logging.getLogger(__name__).error("Failed to write credentials.json: %s", exc)
+
+    token_content = os.getenv("TOKEN_JSON_CONTENT", "").strip()
+    if token_content and not TOKEN_FILE.exists():
+        try:
+            TOKEN_FILE.write_text(token_content, encoding="utf-8")
+            logging.getLogger(__name__).info("Restored token.json from TOKEN_JSON_CONTENT.")
+        except Exception as exc:
+            logging.getLogger(__name__).error("Failed to write token.json: %s", exc)
+
+
+# Run credential restoration if applicable
+restore_cloud_credentials()
+
+# Telegram credentials
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_API_ID_STR: str = os.getenv("TELEGRAM_API_ID", "").strip()
+TELEGRAM_API_HASH: str = os.getenv("TELEGRAM_API_HASH", "").strip()
+
+try:
+    TELEGRAM_API_ID: int = int(TELEGRAM_API_ID_STR) if TELEGRAM_API_ID_STR else 0
+except ValueError:
+    TELEGRAM_API_ID = 0
+
+# Drive managed folder
 DRIVE_FOLDER_ID: str = os.getenv("DRIVE_FOLDER_ID", "").strip()
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
-# Optional raw JSON strings for cloud/container deployment (e.g., Render, Railway)
-CREDENTIALS_JSON_CONTENT: str = os.getenv("CREDENTIALS_JSON_CONTENT", "").strip()
-TOKEN_JSON_CONTENT: str = os.getenv("TOKEN_JSON_CONTENT", "").strip()
+# Render Web Service HTTP Port
+PORT: int = int(os.getenv("PORT", "10000"))
 
 
-def init_cloud_credentials() -> None:
-    """Restore credentials.json and token.json from environment variables if present."""
-    if CREDENTIALS_JSON_CONTENT and not CREDENTIALS_FILE.exists():
-        try:
-            with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
-                f.write(CREDENTIALS_JSON_CONTENT)
-            logging.getLogger(__name__).info("Wrote credentials.json from CREDENTIALS_JSON_CONTENT env var.")
-        except OSError as exc:
-            logging.getLogger(__name__).error("Failed to write credentials.json from env: %s", exc)
-
-    if TOKEN_JSON_CONTENT and not TOKEN_FILE.exists():
-        try:
-            with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-                f.write(TOKEN_JSON_CONTENT)
-            logging.getLogger(__name__).info("Wrote token.json from TOKEN_JSON_CONTENT env var.")
-        except OSError as exc:
-            logging.getLogger(__name__).error("Failed to write token.json from env: %s", exc)
-
-
-def parse_allowed_user_ids(raw_ids: str | None = None) -> Set[int]:
-    """Parse comma-separated list of allowed numeric Telegram user IDs."""
-    if raw_ids is None:
-        raw_ids = os.getenv("ALLOWED_USER_IDS", "")
-
-    allowed: Set[int] = set()
+def parse_allowed_user_ids(raw_ids: str) -> Set[int]:
+    """Parse comma-separated Telegram user IDs."""
+    ids: Set[int] = set()
     for item in raw_ids.split(","):
         cleaned = item.strip()
-        if cleaned:
-            try:
-                allowed.add(int(cleaned))
-            except ValueError:
-                logging.getLogger(__name__).warning("Invalid user ID in ALLOWED_USER_IDS: '%s'", cleaned)
-    return allowed
+        if not cleaned:
+            continue
+        try:
+            ids.add(int(cleaned))
+        except ValueError:
+            logging.getLogger(__name__).warning("Invalid user ID in ALLOWED_USER_IDS: '%s'", cleaned)
+    return ids
 
 
-ALLOWED_USER_IDS: Set[int] = parse_allowed_user_ids()
-
-
-def validate_config(strict: bool = True) -> list[str]:
-    """Validate that required environment variables are set.
-
-    Args:
-        strict: If True, raises ValueError if required variables are missing.
-
-    Returns:
-        List of missing or invalid variable descriptions.
-    """
-    init_cloud_credentials()
-    errors: list[str] = []
-
-    if not TELEGRAM_BOT_TOKEN:
-        errors.append("TELEGRAM_BOT_TOKEN is not set.")
-
-    if not ALLOWED_USER_IDS:
-        errors.append("ALLOWED_USER_IDS must contain at least one valid numeric Telegram user ID.")
-
-    if not DRIVE_FOLDER_ID:
-        errors.append("DRIVE_FOLDER_ID is not set.")
-
-    # Ensure downloads directory exists
-    try:
-        DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        errors.append(f"Cannot create downloads directory {DOWNLOADS_DIR}: {exc}")
-
-    if strict and errors:
-        raise ValueError("Configuration validation failed:\n" + "\n".join(f"- {e}" for e in errors))
-
-    return errors
+ALLOWED_USER_IDS: Set[int] = parse_allowed_user_ids(os.getenv("ALLOWED_USER_IDS", ""))
 
 
 def setup_logging() -> None:
-    """Configure application logging according to LOG_LEVEL."""
+    """Initialize structured application logging."""
     level = getattr(logging, LOG_LEVEL, logging.INFO)
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Silence noisy external library debug logs
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("googleapiclient.discovery").setLevel(logging.WARNING)
-    logging.getLogger("google.auth.transport.requests").setLevel(logging.WARNING)
+    logging.getLogger("pyrogram").setLevel(logging.WARNING)
+
+
+def validate_config() -> list[str]:
+    """Check required environment settings."""
+    errors: list[str] = []
+    if not TELEGRAM_BOT_TOKEN:
+        errors.append("TELEGRAM_BOT_TOKEN is missing or empty in .env")
+    if not TELEGRAM_API_ID:
+        errors.append("TELEGRAM_API_ID is missing or invalid in .env (get it from my.telegram.org/apps)")
+    if not TELEGRAM_API_HASH:
+        errors.append("TELEGRAM_API_HASH is missing or empty in .env (get it from my.telegram.org/apps)")
+    if not DRIVE_FOLDER_ID:
+        errors.append("DRIVE_FOLDER_ID is missing or empty in .env")
+    if not ALLOWED_USER_IDS:
+        errors.append("ALLOWED_USER_IDS is missing or empty in .env")
+    return errors

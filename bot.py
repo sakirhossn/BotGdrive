@@ -1,30 +1,20 @@
-"""Telegram to Google Drive File Manager Bot.
+"""Main application entrypoint for BotGdrive (2 GB MTProto Bot).
 
-Main application entrypoint, command handlers, authorization enforcement,
-and global error handling.
+Runs Pyrogram MTProto client alongside a lightweight stdlib HTTP health server
+for 100% Free Tier Render Web Service deployment.
 """
 
 from __future__ import annotations
 
-import functools
-import html
+import asyncio
 import http.server
 import logging
 import os
+import sys
 import threading
-from typing import Any, Callable
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from pyrogram import Client, filters, idle
+from pyrogram.types import BotCommand
 
 import config
 import drive_service
@@ -33,296 +23,135 @@ import handlers
 logger = logging.getLogger(__name__)
 
 
-def restricted(func: Callable[..., Any]) -> Callable[..., Any]:
-    """Decorator to enforce strict user whitelist authorization.
+class HealthHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal HTTP handler to satisfy Render Web Service health checks."""
 
-    Rejects any Telegram user ID not present in config.ALLOWED_USER_IDS.
-    Independent verification applied on every message and callback query.
-    """
-    @functools.wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args: Any, **kwargs: Any) -> Any:
-        user = update.effective_user
-        if not user or user.id not in config.ALLOWED_USER_IDS:
-            user_id_str = str(user.id) if user else "Unknown"
-            logger.warning("Unauthorized access attempt blocked for user_id=%s", user_id_str)
-            if update.callback_query:
-                await update.callback_query.answer("❌ Not authorized.", show_alert=True)
-            elif update.effective_message:
-                await update.effective_message.reply_text("❌ Not authorized.")
-            return None
-        return await func(update, context, *args, **kwargs)
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - BotGdrive 2GB Active\n")
 
-    return wrapper
+    def log_message(self, format: str, *args: object) -> None:
+        # Suppress verbose HTTP access logs
+        pass
 
 
-def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Build the main dashboard inline keyboard."""
-    keyboard = [
-        [InlineKeyboardButton("📤 Upload File", callback_data="menu:upload")],
-        [InlineKeyboardButton("📁 Browse Drive", callback_data="menu:browse")],
-        [InlineKeyboardButton("📂 Choose Upload Folder", callback_data="menu:upload_folder")],
-        [InlineKeyboardButton("➕ Create Folder", callback_data="menu:mkdir")],
-        [InlineKeyboardButton("🔎 Search Files", callback_data="menu:search")],
-        [InlineKeyboardButton("🗑 Delete", callback_data="menu:delete")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-@restricted
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command. Displays welcome message and main dashboard menu."""
-    message = (
-        "☁️ <b>Google Drive Manager</b>\n\n"
-        "Welcome!\n\n"
-        "Choose an action:"
-    )
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            message,
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-
-
-@restricted
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command. Explains all available bot features and commands."""
-    help_text = (
-        "📖 <b>Google Drive Manager — Help & Commands</b>\n\n"
-        "<b>Available Commands:</b>\n"
-        "• /start — Open the main dashboard menu\n"
-        "• /list — Browse files and folders in current directory\n"
-        "• /folders — View and navigate folder hierarchy\n"
-        "• /mkdir &lt;name&gt; — Create a new folder\n"
-        "• /search &lt;keyword&gt; — Search files inside Google Drive\n"
-        "• /delete — Select files or folders to move to Trash\n"
-        "• /cancel — Cancel an active operation\n"
-        "• /help — Show this help message\n\n"
-        "<b>File Uploads:</b>\n"
-        "Send any document, photo, video, audio, or voice message directly to this chat. "
-        "The bot will prompt you for the destination folder before uploading.\n\n"
-        "<b>Safety Guarantee:</b>\n"
-        "All deletions move items to Google Drive Trash. Files are never permanently deleted."
-    )
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            help_text,
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-
-
-@restricted
-async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle basic navigation callbacks from the main menu."""
-    query = update.callback_query
-    if not query:
-        return
-
-    data = query.data or ""
-    await query.answer()
-
-    if data == "menu:upload":
-        await query.message.reply_text(
-            "📤 <b>Upload File</b>\n\n"
-            "Send any document, photo, video, audio, or voice message directly to this chat.\n"
-            "Maximum download size limit: 20 MB.",
-            parse_mode=ParseMode.HTML,
-        )
-    elif data == "menu:browse":
-        await handlers.render_browse_view(update, context, folder_id=config.DRIVE_FOLDER_ID, page=1)
-    elif data == "menu:upload_folder":
-        user_id = update.effective_user.id if update.effective_user else 0
-        pref_id, pref_name = utils.get_user_upload_pref(user_id)
-        if pref_id and pref_name:
-            curr_str = f"📁 <b>{html.escape(pref_name)}</b>"
-        else:
-            curr_str = "<i>(Default: Root Folder)</i>"
-        await query.message.reply_text(
-            f"📂 <b>Upload Folder Settings</b>\n\n"
-            f"Current upload folder: {curr_str}\n\n"
-            "Send any file to choose a different upload destination, or browse folders using /list.",
-            parse_mode=ParseMode.HTML,
-        )
-    elif data == "menu:mkdir":
-        context.user_data["awaiting_folder_name"] = {
-            "parent_id": context.user_data.get("current_folder_id", config.DRIVE_FOLDER_ID),
-            "for_upload": False,
-        }
-        await query.message.reply_text(
-            "📁 <b>Enter the new folder name:</b>\n\n"
-            "Reply with the name of the folder you want to create.",
-            parse_mode=ParseMode.HTML,
-        )
-    elif data == "menu:search":
-        context.user_data["awaiting_search_keyword"] = True
-        await query.message.reply_text(
-            "🔎 <b>Search Files</b>\n\n"
-            "Reply with the keyword you want to search, or type <code>/search &lt;keyword&gt;</code>.",
-            parse_mode=ParseMode.HTML,
-        )
-    elif data == "menu:delete":
-        await handlers.delete_command(update, context)
-
-
-async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global error handler. Logs detailed error server-side and sends friendly user message."""
-    logger.error("Exception occurred while handling an update:", exc_info=context.error)
-
-    # Do not expose technical tracebacks to users
-    user_message = (
-        "⚠️ <b>An unexpected error occurred.</b>\n\n"
-        "The operation could not be completed. Please try again later."
-    )
-
-    if isinstance(update, Update):
-        if update.callback_query:
-            try:
-                await update.callback_query.answer("⚠️ An error occurred. Please try again.", show_alert=True)
-            except Exception:
-                pass
-        elif update.effective_message:
-            try:
-                await update.effective_message.reply_text(user_message, parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
-
-
-async def post_init(application: Application) -> None:
-    """Register bot commands in Telegram UI menu so they appear in autocomplete and menu button."""
-    commands = [
-        BotCommand("start", "Open the main dashboard menu"),
-        BotCommand("list", "Browse files and folders"),
-        BotCommand("folders", "View folder hierarchy"),
-        BotCommand("search", "Search files in Google Drive"),
-        BotCommand("mkdir", "Create a new folder"),
-        BotCommand("delete", "Delete a file or folder to Trash"),
-        BotCommand("help", "Show help and instructions"),
-    ]
+def start_health_server(port: int) -> None:
+    """Run lightweight HTTP health check server in background daemon thread."""
     try:
-        await application.bot.set_my_commands(commands)
-        logger.info("Registered bot commands in Telegram UI menu.")
+        server = http.server.ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info("Render health server active on port %s", port)
     except Exception as exc:
-        logger.warning("Could not set bot commands: %s", exc)
+        logger.warning("Could not start HTTP health server on port %s: %s", port, exc)
 
 
-def build_application() -> Application:
-    """Construct and configure the Telegram Application instance."""
-    app = (
-        ApplicationBuilder()
-        .token(config.TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .build()
+def create_app() -> Client:
+    """Build and configure the high-performance Pyrogram MTProto Client instance."""
+    config.setup_logging()
+
+    errors = config.validate_config()
+    if errors:
+        for err in errors:
+            logger.error("Configuration error: %s", err)
+        sys.exit(1)
+
+    app = Client(
+        name="bot_gdrive",
+        api_id=config.TELEGRAM_API_ID,
+        api_hash=config.TELEGRAM_API_HASH,
+        bot_token=config.TELEGRAM_BOT_TOKEN,
+        workdir=str(config.BASE_DIR),
+        workers=8,
+        max_concurrent_transmissions=4,
     )
 
-    # Core commands
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("list", handlers.browse_command))
-    app.add_handler(CommandHandler("folders", handlers.browse_command))
-    app.add_handler(CommandHandler("search", handlers.search_command))
-    app.add_handler(CommandHandler("mkdir", handlers.mkdir_command))
-    app.add_handler(CommandHandler("delete", handlers.delete_command))
+    # Register Command Handlers
+    app.on_message(filters.command("start") & filters.private & filters.incoming)(handlers.start_command)
+    app.on_message(filters.command("help") & filters.private & filters.incoming)(handlers.help_command)
+    app.on_message(filters.command("status") & filters.private & filters.incoming)(handlers.status_command)
+    app.on_message(filters.command(["list", "browse"]) & filters.private & filters.incoming)(handlers.list_command)
+    app.on_message(filters.command("setfolder") & filters.private & filters.incoming)(handlers.setfolder_command)
+    app.on_message(filters.command("mkdir") & filters.private & filters.incoming)(handlers.mkdir_command)
+    app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
+    app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
-    # Basic menu callbacks
-    app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r"^menu:"))
+    # Register Callback Query Handler
+    app.on_callback_query()(handlers.callback_handler)
 
-    # Media upload handlers
-    media_filter = (
-        filters.Document.ALL
-        | filters.PHOTO
-        | filters.VIDEO
-        | filters.AUDIO
-        | filters.VOICE
-    )
-    app.add_handler(MessageHandler(media_filter, handlers.handle_media_upload))
+    # Register Media Handler for 2 GB MTProto transfers
+    app.on_message(
+        (filters.document | filters.video | filters.audio | filters.photo) & filters.private & filters.incoming
+    )(handlers.media_handler)
 
-    # Upload callbacks
-    app.add_handler(CallbackQueryHandler(handlers.upload_callback_handler, pattern=r"^up:"))
-
-    # Drive Browse callbacks
-    app.add_handler(CallbackQueryHandler(handlers.browse_callback_handler, pattern=r"^br:"))
-
-    # File details & actions callbacks
-    app.add_handler(CallbackQueryHandler(handlers.file_callback_handler, pattern=r"^fi:"))
-
-    # Delete callbacks
-    app.add_handler(CallbackQueryHandler(handlers.delete_callback_handler, pattern=r"^del:"))
-
-    # Text message handler (for folder creation input and interactive prompts)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text_message))
-
-    # Error handling
-    app.add_error_handler(global_error_handler)
+    # Register Text Handler for conversational inputs (search, mkdir name)
+    app.on_message(
+        filters.text
+        & filters.incoming
+        & ~filters.command(["start", "help", "status", "list", "browse", "setfolder", "mkdir", "search", "cancel"])
+        & filters.private
+    )(handlers.text_handler)
 
     return app
 
 
-def start_health_check_server() -> None:
-    """Start a lightweight background HTTP server to satisfy Render/cloud port binding."""
-    port_str = os.getenv("PORT")
-    if not port_str:
-        return
-
+async def set_menu_commands(app: Client) -> None:
+    """Register command menu autocomplete with Telegram."""
     try:
-        port = int(port_str)
-    except ValueError:
-        return
-
-    class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, format: str, *args: Any) -> None:
-            # Suppress noisy health check access logs
-            pass
-
-    try:
-        server = http.server.HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        logger.info("Health check server listening on 0.0.0.0:%d for cloud deployment.", port)
+        commands = [
+            BotCommand("start", "Open main dashboard menu"),
+            BotCommand("list", "Browse Google Drive files and folders"),
+            BotCommand("setfolder", "Select upload destination folder"),
+            BotCommand("mkdir", "Create a new folder in Drive"),
+            BotCommand("search", "Search for files in Drive"),
+            BotCommand("status", "Check bot and Drive connection status"),
+            BotCommand("help", "Show commands and guide"),
+            BotCommand("cancel", "Cancel current operation"),
+        ]
+        await app.set_bot_commands(commands)
+        logger.info("Bot command menu registered successfully.")
     except Exception as exc:
-        logger.warning("Could not start health check server on port %d: %s", port, exc)
+        logger.warning("Could not set bot commands: %s", exc)
 
 
 def main() -> None:
-    """Entrypoint to validate environment and run bot."""
-    config.setup_logging()
+    """Main entrypoint."""
+    logger.info("Initializing BotGdrive (2 GB MTProto Google Drive Bot)...")
 
-    # Start health check server if PORT environment variable is present (e.g. Render Web Service)
-    start_health_check_server()
+    # Start Render health server
+    start_health_server(config.PORT)
 
-    # Validate configuration
-    validation_errors = config.validate_config(strict=False)
-    if validation_errors:
-        logger.error("Configuration validation failed:")
-        for err in validation_errors:
-            logger.error("  - %s", err)
-        logger.error("Please configure the missing values in your .env file before starting.")
-        return
-
-    # Authenticate Google Drive on startup (opens browser on first run if token.json is not present)
-    if config.CREDENTIALS_FILE.exists() or config.TOKEN_FILE.exists():
-        logger.info("Initializing Google Drive authentication...")
-        try:
-            drive_service.default_drive_service.authenticate()
-            logger.info("Google Drive authentication ready.")
-        except Exception as exc:
-            logger.error("Google Drive authentication failed: %s", exc)
-            return
-    else:
-        logger.warning(
-            "credentials.json not found at '%s'. Google Drive features will require credentials.json.",
-            config.CREDENTIALS_FILE,
+    # Pre-flight check Google Drive connection
+    try:
+        root_folder = drive_service.default_drive_service.get_root_folder()
+        logger.info(
+            "Google Drive API verified. Root folder: '%s' (ID=%s)",
+            root_folder.get("name"),
+            root_folder.get("id"),
         )
+    except Exception as exc:
+        logger.error("Failed to connect to Google Drive: %s", exc)
+        sys.exit(1)
 
-    logger.info("Starting Telegram Drive Bot... (Waiting for Telegram messages)")
-    app = build_application()
-    app.run_polling()
+    app = create_app()
+
+    async def _runner() -> None:
+        await app.start()
+        try:
+            await set_menu_commands(app)
+            me = await app.get_me()
+            logger.info("=" * 60)
+            logger.info("🤖 Bot Started Successfully: @%s (%s)", me.username, me.id)
+            logger.info("⚡ MTProto Protocol Active: File transfers up to 2,000 MB (2 GB)")
+            logger.info("🔒 Authorized User IDs: %s", config.ALLOWED_USER_IDS)
+            logger.info("=" * 60)
+            await idle()
+        finally:
+            await app.stop()
+
+    app.run(_runner())
 
 
 if __name__ == "__main__":
