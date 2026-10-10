@@ -122,6 +122,48 @@ python bot.py
 
 ---
 
+### G. 24/7 Free Cloud Deployment (Render.com)
+
+You can run the bot 24/7 in the cloud without keeping your laptop on using [Render.com](https://render.com) (Free Tier):
+
+1. **Push your code to GitHub** (ensure `.env`, `credentials.json`, and `token.json` remain in `.gitignore` and are not committed).
+2. Go to [Render Dashboard](https://dashboard.render.com/) $\rightarrow$ **New +** $\rightarrow$ **Web Service**.
+3. Connect your GitHub repository (`BotGdrive`).
+4. Configure service settings:
+   - **Name**: `botgdrive`
+   - **Environment**: `Python 3`
+   - **Region**: Nearest to you
+   - **Branch**: `main`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python bot.py`
+   - **Plan**: `Free`
+5. Click **Advanced** $\rightarrow$ **Add Environment Variable** and add:
+   - `TELEGRAM_BOT_TOKEN`: Your Telegram Bot API token
+   - `ALLOWED_USER_IDS`: Your Telegram user ID
+   - `DRIVE_FOLDER_ID`: Your Google Drive managed root folder ID
+   - `LOG_LEVEL`: `INFO`
+   - `CREDENTIALS_JSON_CONTENT`: The entire raw contents of your local `credentials.json` file
+   - `TOKEN_JSON_CONTENT`: The entire raw contents of your local `token.json` file
+6. Click **Create Web Service**. Render will automatically build and start the bot.
+
+#### ⏰ Keeping Render Awake 24/7 (Preventing 15-Minute Inactivity Sleep)
+On the Render Free Tier, Web Services automatically spin down ("go to sleep") if no inbound HTTP requests arrive within 15 minutes. Because Telegram polling makes *outbound* requests to Telegram, Render does not count them as web activity.
+
+To prevent the container from sleeping:
+1. Copy your Render Web Service URL from your Render dashboard (e.g. `https://botgdrive-xxxx.onrender.com`).
+2. Go to a free uptime monitor such as [UptimeRobot](https://uptimerobot.com) or [Cron-job.org](https://cron-job.org).
+3. Create a free HTTP monitor:
+   - **Monitor Type**: `HTTP(s)`
+   - **Friendly Name**: `BotGdrive Keep-Alive`
+   - **URL**: `https://botgdrive-xxxx.onrender.com/`
+   - **Monitoring Interval**: Every 5 or 10 minutes
+4. `bot.py` has a built-in health-check HTTP server that responds `200 OK`. Every ping resets Render's 15-minute timer, keeping your bot continuously active 24/7!
+
+> [!WARNING]
+> **Avoid 409 Conflict Errors**: Never run `python bot.py` locally on your laptop at the same time while Render is running. Telegram only allows ONE active polling connection per bot token. If both run simultaneously, Telegram terminates polling with a `409 Conflict` error.
+
+---
+
 ## 🕹 Usage & Commands
 
 | Command | Description |
@@ -184,6 +226,8 @@ python bot.py
 | `❌ File too large` | Telegram Bot API allows bots to download files only up to 20 MB. Larger files must be uploaded via the Drive web UI. |
 | `📦 This file is larger than Telegram's send limit` | Telegram allows bots to send documents up to 50 MB. The bot provides a direct Drive link instead. |
 | `token.json` expired or invalid | Delete `token.json` and restart `python bot.py` to trigger a clean OAuth browser authorization. |
+| `Bot stops responding after ~15 minutes on Render` | Render Free Web Services sleep after 15 minutes of no inbound web traffic. Set up a free HTTP ping on [UptimeRobot](https://uptimerobot.com) to ping your Render URL every 5–10 minutes. |
+| `409 Conflict: terminated by other getUpdates request` | Two bot instances are polling Telegram simultaneously with the same token. Stop the local bot on your laptop (`Ctrl + C`) if Render is running. |
 
 ---
 
@@ -195,6 +239,6 @@ python -m unittest discover -p "test_step*.py"
 ```
 Output:
 ```text
-Ran 35 tests in 0.242s
+Ran 36 tests in 0.778s
 OK
 ```
