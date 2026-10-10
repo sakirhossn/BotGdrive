@@ -13,6 +13,13 @@ import os
 import sys
 import threading
 
+# Python 3.14+ / Asyncio safety patch: Ensure event loop exists before importing Pyrogram
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from pyrogram import Client, filters, idle
 from pyrogram.types import BotCommand
 
@@ -68,7 +75,7 @@ def create_app() -> Client:
         max_concurrent_transmissions=4,
     )
 
-    # Register Command Handlers
+    # Private Chat Commands
     app.on_message(filters.command("start") & filters.private & filters.incoming)(handlers.start_command)
     app.on_message(filters.command("help") & filters.private & filters.incoming)(handlers.help_command)
     app.on_message(filters.command("status") & filters.private & filters.incoming)(handlers.status_command)
@@ -78,19 +85,26 @@ def create_app() -> Client:
     app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
     app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
-    # Register Callback Query Handler
+    # Group & Private Commands (for Admins / Whitelisted)
+    app.on_message(filters.command("getfile") & (filters.private | filters.group) & filters.incoming)(handlers.getfile_command)
+    app.on_message(filters.command("link") & (filters.private | filters.group) & filters.incoming)(handlers.link_command)
+    app.on_message(filters.command(["upload", "save"]) & filters.reply & (filters.private | filters.group) & filters.incoming)(
+        handlers.upload_reply_command
+    )
+
+    # Callback Queries
     app.on_callback_query()(handlers.callback_handler)
 
-    # Register Media Handler for 2 GB MTProto transfers
+    # Media Handler for 2 GB MTProto transfers in Private Chats
     app.on_message(
         (filters.document | filters.video | filters.audio | filters.photo) & filters.private & filters.incoming
     )(handlers.media_handler)
 
-    # Register Text Handler for conversational inputs (search, mkdir name)
+    # Text Handler for conversational inputs (search, mkdir name)
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "setfolder", "mkdir", "search", "cancel"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "setfolder", "mkdir", "search", "cancel", "getfile", "link", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -106,6 +120,8 @@ async def set_menu_commands(app: Client) -> None:
             BotCommand("setfolder", "Select upload destination folder"),
             BotCommand("mkdir", "Create a new folder in Drive"),
             BotCommand("search", "Search for files in Drive"),
+            BotCommand("getfile", "Deliver a Drive file into the chat (up to 2GB)"),
+            BotCommand("link", "Share Google Drive link into chat"),
             BotCommand("status", "Check bot and Drive connection status"),
             BotCommand("help", "Show commands and guide"),
             BotCommand("cancel", "Cancel current operation"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import math
 import re
 import time
@@ -55,12 +56,20 @@ def sanitize_filename(filename: Optional[str], default_prefix: str = "file") -> 
 
 
 class ProgressTracker:
-    """Helper to track download/upload progress with ETA and throttled updates."""
+    """Helper to track download/upload progress with modern formatted cards, ETA, and throttled updates."""
 
-    def __init__(self, action_name: str, filename: str, total_bytes: int, update_interval: float = 3.0):
+    def __init__(
+        self,
+        action_name: str,
+        filename: str,
+        total_bytes: int,
+        target_folder: Optional[str] = None,
+        update_interval: float = 3.5,
+    ) -> None:
         self.action_name = action_name
         self.filename = filename
         self.total_bytes = total_bytes
+        self.target_folder = target_folder
         self.update_interval = update_interval
         self.start_time = time.time()
         self.last_update_time = self.start_time
@@ -74,7 +83,7 @@ class ProgressTracker:
         return False
 
     def format_status(self, current_bytes: int) -> str:
-        """Build formatted progress bar, transfer speed, and ETA message."""
+        """Build modern formatted progress card."""
         now = time.time()
         elapsed = max(now - self.start_time, 0.001)
         speed = current_bytes / elapsed
@@ -83,21 +92,56 @@ class ProgressTracker:
         if self.total_bytes > 0:
             pct = min(max((current_bytes / self.total_bytes) * 100, 0), 100)
             filled = int(pct // 10)
-            bar = "█" * filled + "░" * (10 - filled)
+            bar = "▰" * filled + "▱" * (10 - filled)
 
-            eta_str = ""
+            eta_val = "calculating..."
             if speed > 0 and current_bytes < self.total_bytes:
-                remaining_secs = (self.total_bytes - current_bytes) / speed
-                eta_str = f" | ⏳ ETA: {format_time(remaining_secs)}"
+                eta_val = format_time((self.total_bytes - current_bytes) / speed)
+            elif current_bytes >= self.total_bytes:
+                eta_val = "complete"
+
+            dest_line = f"\n📁 <b>Destination:</b> <code>{html.escape(self.target_folder)}</code>" if self.target_folder else ""
 
             return (
-                f"{self.action_name}: <b>{self.filename}</b>\n\n"
-                f"[{bar}] {pct:.1f}%\n"
-                f"📦 {format_file_size(current_bytes)} of {format_file_size(self.total_bytes)}\n"
-                f"⚡ Speed: {speed_str}{eta_str}"
+                "⚡ <b>File Transfer in Progress</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📄 <b>File:</b> <code>{html.escape(self.filename)}</code>\n"
+                f"📦 <b>Size:</b> {format_file_size(current_bytes)} / {format_file_size(self.total_bytes)} ({pct:.1f}%)\n"
+                f"🚀 <b>Phase:</b> {self.action_name}\n\n"
+                f"<code>[{bar}] {pct:.1f}%</code>\n\n"
+                f"⚡ <b>Speed:</b> <code>{speed_str}</code>\n"
+                f"⏳ <b>ETA:</b> <code>{eta_val}</code>"
+                f"{dest_line}\n"
+                "━━━━━━━━━━━━━━━━━━━━"
             )
+
         return (
-            f"{self.action_name}: <b>{self.filename}</b>\n\n"
-            f"📦 Processed: {format_file_size(current_bytes)}\n"
-            f"⚡ Speed: {speed_str}"
+            "⚡ <b>File Transfer in Progress</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>File:</b> <code>{html.escape(self.filename)}</code>\n"
+            f"📦 <b>Processed:</b> {format_file_size(current_bytes)}\n"
+            f"🚀 <b>Phase:</b> {self.action_name}\n\n"
+            f"⚡ <b>Speed:</b> <code>{speed_str}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━"
         )
+
+
+def format_completion_card(
+    filename: str,
+    file_size: int,
+    folder_name: str,
+    elapsed_seconds: float,
+    view_link: str,
+) -> str:
+    """Format sleek completion summary card."""
+    avg_speed = file_size / max(elapsed_seconds, 0.001)
+    return (
+        "✅ <b>Upload Successfully Completed!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 <b>File Name:</b> <code>{html.escape(filename)}</code>\n"
+        f"📦 <b>File Size:</b> {format_file_size(file_size)}\n"
+        f"📁 <b>Drive Folder:</b> <code>{html.escape(folder_name)}</code>\n"
+        f"⏱ <b>Time Taken:</b> {format_time(elapsed_seconds)} (Avg: {format_file_size(int(avg_speed))}/s)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href='{view_link}'><b>Open in Google Drive ↗</b></a>"
+    )
