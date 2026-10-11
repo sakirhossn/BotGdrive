@@ -48,9 +48,17 @@ def restricted(func: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(func)
     async def wrapper(client: Client, update: Message | CallbackQuery, *args: Any, **kwargs: Any) -> Any:
-        user = update.from_user
-        if not user or user.id not in config.ALLOWED_USER_IDS:
-            user_id_str = str(user.id) if user else "Unknown"
+        user = getattr(update, "from_user", None)
+        user_id = user.id if user else None
+
+        # If update is a Message where author is the bot (e.g. delegated from callback),
+        # in private chat update.chat.id is the actual human user.
+        if isinstance(update, Message) and update.chat and update.chat.type == ChatType.PRIVATE:
+            if user and user.is_bot:
+                user_id = update.chat.id
+
+        if not user_id or user_id not in config.ALLOWED_USER_IDS:
+            user_id_str = str(user_id) if user_id else "Unknown"
             logger.warning("Unauthorized access blocked for user_id=%s", user_id_str)
             if isinstance(update, CallbackQuery):
                 await update.answer("❌ Not authorized.", show_alert=True)
@@ -859,7 +867,25 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
 
     if data == "act:delete_menu":
         await callback.answer()
-        await delete_command(client, callback.message)
+        target_id, target_name = state_manager.get_upload_folder(user_id)
+        try:
+            folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, target_id)
+            text, markup = build_folder_browser_keyboard(
+                folder_id=target_id,
+                parent_id=None,
+                folders=folders,
+                files=files,
+                page=0,
+                is_select_mode=False,
+            )
+            await callback.message.edit_text(
+                f"🗑 <b>Select any item to delete by clicking the 🗑 button:</b>\n\n{text}",
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.exception("Failed to load delete browser: %s", exc)
+            await callback.message.edit_text(f"❌ Error: {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
         return
 
     if data == "act:group_info":
@@ -884,17 +910,111 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
 
     if data == "act:status":
         await callback.answer("Checking status...")
-        await status_command(client, callback.message)
+        try:
+            root_meta = await asyncio.to_thread(drive_service.default_drive_service.get_root_folder)
+            root_name = root_meta.get("name", "Unknown")
+            target_id, target_name = state_manager.get_upload_folder(user_id)
+            dl_size = sum(f.stat().st_size for f in config.DOWNLOADS_DIR.glob("**/*") if f.is_file())
+
+            text = (
+                "📊 <b>System & Service Status</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🟢 <b>MTProto Protocol:</b> Connected (2 GB Support Active)\n"
+                f"🟢 <b>Google Drive API:</b> Connected\n"
+                f"📁 <b>Drive Root Folder:</b> <code>{html.escape(root_name)}</code>\n"
+                f"📌 <b>Active Upload Destination:</b> <code>{html.escape(target_name)}</code>\n"
+                f"💾 <b>Local Cache Usage:</b> {utils.format_file_size(dl_size)}\n"
+                "━━━━━━━━━━━━━━━━━━━━"
+            )
+            buttons = [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:main")]]
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            logger.exception("Status check failed: %s", exc)
+            await callback.message.edit_text(f"❌ <b>Error:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
         return
 
     if data == "act:help":
         await callback.answer()
-        await help_command(client, callback.message)
+        help_text = (
+            "📖 <b>Google Drive 2 GB Bot — Command Guide</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<b>Direct Large File Transfers (up to 2,000 MB):</b>\n"
+            "• Forward or upload any Document, Video, or Audio.\n"
+            "• Real-time progress updates with speed and ETA.\n"
+            "• Auto cleanup immediately after Drive confirmation.\n\n"
+            "<b>Private Chat Commands:</b>\n"
+            "• /start — Open main dashboard menu\n"
+            "• /list or /browse — Explore Drive folders & files\n"
+            "• /folders or /folder — View folder hierarchy & structure\n"
+            "• /setfolder &lt;name&gt; — Pick destination folder for your uploads\n"
+            "• /mkdir &lt;folder_name&gt; — Create a new folder\n"
+            "• /search &lt;keyword&gt; — Search files inside Drive\n"
+            "• /delete &lt;keyword&gt; — Select files or folders to move to Trash\n"
+            "• /status — Check bot health, MTProto and Drive status\n"
+            "• /cancel — Cancel any active interactive prompt\n\n"
+            "<b>Group Commands (for Admins / Owner):</b>\n"
+            "• /getfile &lt;keyword&gt; — Fetch file from Drive and post directly into the group\n"
+            "• /link &lt;keyword&gt; — Post direct Google Drive link into group\n"
+            "• Reply with /upload or /save — Save any group file into Drive\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
+        buttons = [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:main")]]
+        await callback.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
         return
 
     if data == "act:folders":
         await callback.answer("Loading folder hierarchy...")
-        await folders_command(client, callback.message)
+        target_id, target_name = state_manager.get_upload_folder(user_id)
+        try:
+            tree = await asyncio.to_thread(drive_service.default_drive_service.get_folder_tree)
+            lines = [
+                "🗂️ <b>Google Drive Folder Hierarchy</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+            ]
+            buttons = []
+            folder_btn_row = []
+
+            for item in tree:
+                name = item["name"]
+                depth = item["depth"]
+                item_id = item["id"]
+                if depth == 0:
+                    is_current = item_id == target_id
+                    marker = " 👈 <i>(Active)</i>" if is_current else ""
+                    lines.append(f"📁 <b>{html.escape(name)}</b> <i>(Root)</i>{marker}")
+                else:
+                    indent = "   " * (depth - 1)
+                    is_current = item_id == target_id
+                    marker = " 👈 <b>(Active)</b>" if is_current else ""
+                    lines.append(f"{indent}└── 📁 <code>{html.escape(name)}</code>{marker}")
+
+                    btn_label = utils.truncate_button_text(f"📁 {name}", 20)
+                    folder_btn_row.append(InlineKeyboardButton(btn_label, callback_data=f"nav:{item_id}"))
+                    if len(folder_btn_row) == 2:
+                        buttons.append(folder_btn_row)
+                        folder_btn_row = []
+
+            if folder_btn_row:
+                buttons.append(folder_btn_row)
+
+            lines.append("━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"📌 <b>Active Upload Target:</b> <code>{html.escape(target_name)}</code>")
+            lines.append("💡 <i>Click any folder button to explore or change target:</i>")
+
+            buttons.append([
+                InlineKeyboardButton("📂 Set Target Folder", callback_data="nav:select_mode:root"),
+                InlineKeyboardButton("➕ New Folder", callback_data="act:mkdir"),
+            ])
+            buttons.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+
+            await callback.message.edit_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.exception("Failed to load folder hierarchy: %s", exc)
+            await callback.message.edit_text(f"❌ <b>Error:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
         return
 
     if data == "act:mkdir":
