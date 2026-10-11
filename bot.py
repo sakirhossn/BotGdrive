@@ -83,6 +83,7 @@ def create_app() -> Client:
     app.on_message(filters.command("setfolder") & filters.private & filters.incoming)(handlers.setfolder_command)
     app.on_message(filters.command("mkdir") & filters.private & filters.incoming)(handlers.mkdir_command)
     app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
+    app.on_message(filters.command("delete") & filters.private & filters.incoming)(handlers.delete_command)
     app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
     # Group & Private Commands (for Admins / Whitelisted)
@@ -104,7 +105,7 @@ def create_app() -> Client:
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "setfolder", "mkdir", "search", "cancel", "getfile", "link", "upload", "save"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "setfolder", "mkdir", "search", "delete", "cancel", "getfile", "link", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -120,6 +121,7 @@ async def set_menu_commands(app: Client) -> None:
             BotCommand("setfolder", "Select upload destination folder"),
             BotCommand("mkdir", "Create a new folder in Drive"),
             BotCommand("search", "Search for files in Drive"),
+            BotCommand("delete", "Delete file or folder safely to Trash"),
             BotCommand("getfile", "Deliver a Drive file into the chat (up to 2GB)"),
             BotCommand("link", "Share Google Drive link into chat"),
             BotCommand("status", "Check bot and Drive connection status"),

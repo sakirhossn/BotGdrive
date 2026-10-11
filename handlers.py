@@ -1,4 +1,4 @@
-"""Pyrogram event handlers for 2 GB MTProto media transfers, Drive navigation, and group sharing."""
+"""Pyrogram event handlers for 2 GB MTProto media transfers, Drive navigation, deletion, and group sharing."""
 
 from __future__ import annotations
 
@@ -87,10 +87,11 @@ def build_main_menu(user_id: int, user_first_name: str = "User") -> tuple[str, I
                 InlineKeyboardButton("🔎 Search Files", callback_data="act:search"),
             ],
             [
+                InlineKeyboardButton("🗑 Delete Items", callback_data="act:delete_menu"),
                 InlineKeyboardButton("📤 Group Sharing Info", callback_data="act:group_info"),
-                InlineKeyboardButton("📊 System Status", callback_data="act:status"),
             ],
             [
+                InlineKeyboardButton("📊 System Status", callback_data="act:status"),
                 InlineKeyboardButton("📖 Help & Guide", callback_data="act:help"),
             ],
         ]
@@ -107,7 +108,7 @@ def build_folder_browser_keyboard(
     is_select_mode: bool = False,
     items_per_page: int = 6,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build an interactive paginated folder browser."""
+    """Build an interactive paginated folder browser with direct delete buttons."""
     total_folders = len(folders)
     total_files = len(files)
     all_items = [(True, f) for f in folders] + [(False, f) for f in files]
@@ -128,14 +129,23 @@ def build_folder_browser_keyboard(
         item_name = item.get("name", "Untitled")
         item_id = item.get("id")
         if is_folder:
-            label = utils.truncate_button_text(f"📁 {item_name}", 32)
+            label = utils.truncate_button_text(f"📁 {item_name}", 26)
             cb = f"nav:sel_mode:{item_id}" if is_select_mode else f"nav:{item_id}"
-            buttons.append([InlineKeyboardButton(label, callback_data=cb)])
+            if is_select_mode:
+                buttons.append([InlineKeyboardButton(label, callback_data=cb)])
+            else:
+                buttons.append([
+                    InlineKeyboardButton(label, callback_data=cb),
+                    InlineKeyboardButton("🗑", callback_data=f"del:ask:{item_id}"),
+                ])
         else:
             size_str = utils.format_file_size(int(item.get("size", 0)))
-            label = utils.truncate_button_text(f"📄 {item_name} ({size_str})", 32)
+            label = utils.truncate_button_text(f"📄 {item_name} ({size_str})", 26)
             web_link = item.get("webViewLink") or drive_service.default_drive_service.build_drive_link(item_id)
-            buttons.append([InlineKeyboardButton(label, url=web_link)])
+            buttons.append([
+                InlineKeyboardButton(label, url=web_link),
+                InlineKeyboardButton("🗑", callback_data=f"del:ask:{item_id}"),
+            ])
 
     nav_row: List[InlineKeyboardButton] = []
     if page > 0:
@@ -194,6 +204,7 @@ async def help_command(client: Client, message: Message) -> None:
         "• /setfolder — Pick destination folder for your uploads\n"
         "• /mkdir &lt;folder_name&gt; — Create a new folder\n"
         "• /search &lt;keyword&gt; — Search files inside Drive\n"
+        "• /delete &lt;keyword&gt; — Select files or folders to move to Trash\n"
         "• /status — Check bot health, MTProto and Drive status\n"
         "• /cancel — Cancel any active interactive prompt\n\n"
         "<b>Group Commands (for Admins / Owner):</b>\n"
@@ -251,6 +262,57 @@ async def list_command(client: Client, message: Message) -> None:
     except Exception as exc:
         logger.exception("Failed to list folder: %s", exc)
         await wait_msg.edit_text(f"❌ <b>Error loading folder:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+
+
+@restricted
+async def delete_command(client: Client, message: Message) -> None:
+    """Handle /delete command to safely trash files or folders."""
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        query = parts[1].strip()
+        status_msg = await message.reply_text(f"🔍 Searching files to delete matching '<b>{html.escape(query)}</b>'...", parse_mode=ParseMode.HTML)
+        try:
+            matched = await asyncio.to_thread(drive_service.default_drive_service.search_files, query)
+            if not matched:
+                await status_msg.edit_text(f"❌ No files found matching '<b>{html.escape(query)}</b>'.", parse_mode=ParseMode.HTML)
+                return
+
+            buttons = []
+            for f in matched[:6]:
+                f_size = utils.format_file_size(int(f.get("size", 0)))
+                label = utils.truncate_button_text(f"🗑 {f['name']} ({f_size})", 32)
+                buttons.append([InlineKeyboardButton(label, callback_data=f"del:ask:{f['id']}")])
+            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="grp_cancel")])
+
+            await status_msg.edit_text(
+                f"🗑 <b>Found {len(matched)} matching file(s).</b>\nSelect the item you want to move to Trash:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.exception("Failed to search for delete: %s", exc)
+            await status_msg.edit_text(f"❌ Error: {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+    else:
+        target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
+        wait_msg = await message.reply_text(f"🗑 <b>Loading items in {html.escape(target_name)} to delete...</b>", parse_mode=ParseMode.HTML)
+        try:
+            folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, target_id)
+            text, markup = build_folder_browser_keyboard(
+                folder_id=target_id,
+                parent_id=None,
+                folders=folders,
+                files=files,
+                page=0,
+                is_select_mode=False,
+            )
+            await wait_msg.edit_text(
+                f"🗑 <b>Select any item to delete by clicking the 🗑 button:</b>\n\n{text}",
+                reply_markup=markup,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.exception("Failed to load delete browser: %s", exc)
+            await wait_msg.edit_text(f"❌ Error: {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
 
 
 @restricted
@@ -367,11 +429,9 @@ async def getfile_command(client: Client, message: Message) -> None:
             return
 
         if len(matched) == 1:
-            # Single match: deliver directly
             target_file = matched[0]
             await _deliver_file_to_chat(client, message.chat.id, status_msg, target_file)
         else:
-            # Multiple matches: show choice buttons to admin
             buttons = []
             for f in matched[:6]:
                 f_size = utils.format_file_size(int(f.get("size", 0)))
@@ -480,7 +540,6 @@ async def _deliver_file_to_chat(client: Client, chat_id: int, status_msg: Messag
             progress_callback=dl_progress,
         )
 
-        # Upload to Telegram chat
         await status_msg.edit_text(
             f"🚀 <b>Posting to Telegram:</b> <code>{html.escape(safe_name)}</code>\n"
             f"📦 Size: {utils.format_file_size(file_size)}",
@@ -523,7 +582,6 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         return
 
     if data.startswith("grp_send:"):
-        # Admin selected file to send to group
         file_id = data.split(":", 1)[1]
         await callback.answer("Fetching file from Drive...")
         try:
@@ -531,6 +589,110 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             await _deliver_file_to_chat(client, callback.message.chat.id, callback.message, meta)
         except Exception as exc:
             await callback.message.edit_text(f"❌ Failed: {exc}")
+        return
+
+    # Delete confirmations
+    if data.startswith("del:ask:"):
+        if user_id not in config.ALLOWED_USER_IDS:
+            await callback.answer("❌ Not authorized to delete files.", show_alert=True)
+            return
+
+        item_id = data.split(":", 2)[2]
+        if item_id == config.DRIVE_FOLDER_ID:
+            await callback.answer("❌ The root folder cannot be deleted.", show_alert=True)
+            return
+
+        is_valid = await asyncio.to_thread(
+            drive_service.default_drive_service.is_within_managed_root, item_id
+        )
+        if not is_valid:
+            await callback.answer("❌ Cannot delete items outside managed directory.", show_alert=True)
+            return
+
+        try:
+            meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, item_id)
+            name = meta.get("name", "Untitled")
+            is_folder = meta.get("mimeType") == "application/vnd.google-apps.folder"
+            size_str = utils.format_file_size(int(meta.get("size", 0))) if not is_folder else "Folder"
+            parents = meta.get("parents", [])
+            parent_id = parents[0] if parents else config.DRIVE_FOLDER_ID
+
+            buttons = [
+                [
+                    InlineKeyboardButton("🗑 Yes, Move to Trash", callback_data=f"del:yes:{item_id}:{parent_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"del:no:{parent_id}"),
+                ]
+            ]
+
+            confirm_text = (
+                "⚠️ <b>Confirm Deletion</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"{'📁' if is_folder else '📄'} <b>Name:</b> <code>{html.escape(name)}</code>\n"
+                f"📦 <b>Type/Size:</b> {size_str}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>This item will be safely moved to Google Drive Trash.\n"
+                "It will NOT be permanently deleted immediately.</i>"
+            )
+            await callback.message.edit_text(confirm_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+            await callback.answer()
+        except Exception as exc:
+            logger.exception("Failed to prompt delete: %s", exc)
+            await callback.answer(f"❌ Error: {exc}", show_alert=True)
+        return
+
+    if data.startswith("del:yes:"):
+        if user_id not in config.ALLOWED_USER_IDS:
+            await callback.answer("❌ Not authorized.", show_alert=True)
+            return
+
+        _, _, item_id, parent_id = data.split(":", 3)
+        if item_id == config.DRIVE_FOLDER_ID:
+            await callback.answer("❌ The root folder cannot be deleted.", show_alert=True)
+            return
+
+        await callback.answer("Moving to Trash...")
+        try:
+            meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, item_id)
+            name = meta.get("name", "Item")
+            await asyncio.to_thread(drive_service.default_drive_service.trash_file, item_id)
+
+            buttons = [
+                [InlineKeyboardButton("📁 Back to Folder", callback_data=f"nav:{parent_id}")],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+            ]
+            success_text = (
+                "✅ <b>Successfully Moved to Trash</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{html.escape(name)}</code> has been moved to Google Drive Trash.\n"
+                "━━━━━━━━━━━━━━━━━━━━"
+            )
+            await callback.message.edit_text(success_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            logger.exception("Failed to trash file %s: %s", item_id, exc)
+            await callback.message.edit_text(f"❌ <b>Error deleting item:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+        return
+
+    if data.startswith("del:no:"):
+        parent_id = data.split(":", 2)[2]
+        await callback.answer("Deletion cancelled.")
+        try:
+            folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, parent_id)
+            meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, parent_id)
+            parents = meta.get("parents", [])
+            up_parent = parents[0] if parents and parent_id != config.DRIVE_FOLDER_ID else None
+
+            text, markup = build_folder_browser_keyboard(
+                folder_id=parent_id,
+                parent_id=up_parent,
+                folders=folders,
+                files=files,
+                page=0,
+                is_select_mode=False,
+            )
+            await callback.message.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            text, keyboard = build_main_menu(user_id, callback.from_user.first_name)
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         return
 
     # Private menu callbacks require whitelist
@@ -542,6 +704,11 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         text, keyboard = build_main_menu(user_id, callback.from_user.first_name)
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         await callback.answer()
+        return
+
+    if data == "act:delete_menu":
+        await callback.answer()
+        await delete_command(client, callback.message)
         return
 
     if data == "act:group_info":
