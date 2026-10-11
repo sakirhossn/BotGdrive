@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import logging
 from pathlib import Path
+import socket
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from google.auth.transport.requests import Request
@@ -20,6 +22,9 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import config
 
 logger = logging.getLogger(__name__)
+
+# Set 120s socket timeout to prevent read operation timeouts on large chunk transfers
+socket.setdefaulttimeout(120)
 
 SCOPES: list[str] = ["https://www.googleapis.com/auth/drive"]
 
@@ -310,8 +315,8 @@ class DriveService:
             "parents": [target_folder],
         }
 
-        # 20 MB chunk size for maximum throughput on cloud Gigabit networks
-        chunk_size = 20 * 1024 * 1024
+        # 5 MB chunk size (20 * 256 KB) optimizes throughput while staying safely below socket read timeouts
+        chunk_size = 5 * 1024 * 1024
         media = MediaFileUpload(
             str(local_path),
             mimetype=mime_type or "application/octet-stream",
@@ -327,8 +332,23 @@ class DriveService:
         )
 
         response = None
+        retries = 0
+        max_retries = 5
         while response is None:
-            status, response = request.next_chunk()
+            try:
+                status, response = request.next_chunk(num_retries=2)
+                retries = 0
+            except (socket.timeout, TimeoutError, OSError, Exception) as exc:
+                if "timed out" in str(exc).lower() or isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+                    retries += 1
+                    if retries > max_retries:
+                        logger.error("Exceeded max retries (%d) during resumable upload: %s", max_retries, exc)
+                        raise
+                    wait_time = retries * 2
+                    logger.warning("Upload chunk timeout (%s). Resuming in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
+                    time.sleep(wait_time)
+                    continue
+                raise
             if status and progress_callback:
                 progress_callback(status.resumable_progress, file_size)
 
@@ -357,10 +377,25 @@ class DriveService:
 
         request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
         with open(dest, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request, chunksize=20 * 1024 * 1024)
+            downloader = MediaIoBaseDownload(fh, request, chunksize=5 * 1024 * 1024)
             done = False
+            retries = 0
+            max_retries = 5
             while not done:
-                status, done = downloader.next_chunk()
+                try:
+                    status, done = downloader.next_chunk(num_retries=2)
+                    retries = 0
+                except (socket.timeout, TimeoutError, OSError, Exception) as exc:
+                    if "timed out" in str(exc).lower() or isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+                        retries += 1
+                        if retries > max_retries:
+                            logger.error("Exceeded max retries (%d) during Drive download: %s", max_retries, exc)
+                            raise
+                        wait_time = retries * 2
+                        logger.warning("Download chunk timeout (%s). Retrying in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
+                        time.sleep(wait_time)
+                        continue
+                    raise
                 if status and progress_callback and total_size > 0:
                     progress_callback(int(status.progress() * total_size), total_size)
 

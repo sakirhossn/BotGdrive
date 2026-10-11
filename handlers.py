@@ -6,7 +6,6 @@ import asyncio
 import functools
 import html
 import logging
-import os
 import time
 import uuid
 from pathlib import Path
@@ -1225,13 +1224,24 @@ async def media_handler(client: Client, message: Message) -> None:
                 logger.debug("Download progress edit error: %s", e)
 
     try:
-        # Step 1: Download via MTProto
-        logger.info("Starting MTProto download for '%s' (size=%s)", safe_name, file_size)
-        downloaded_path = await client.download_media(
-            message=message,
-            file_name=str(local_dest),
-            progress=dl_progress,
-        )
+        # Step 1: Download via MTProto with retry
+        downloaded_path = None
+        for dl_attempt in range(1, 3):
+            try:
+                logger.info("Starting MTProto download for '%s' (attempt %d/2, size=%s)", safe_name, dl_attempt, file_size)
+                downloaded_path = await client.download_media(
+                    message=message,
+                    file_name=str(local_dest),
+                    progress=dl_progress,
+                )
+                if downloaded_path and Path(downloaded_path).exists():
+                    break
+            except Exception as dl_err:
+                if dl_attempt < 2 and ("timed out" in str(dl_err).lower() or isinstance(dl_err, (TimeoutError, ConnectionError))):
+                    logger.warning("MTProto download timed out on attempt 1: %s. Retrying in 2s...", dl_err)
+                    await asyncio.sleep(2)
+                    continue
+                raise
 
         if not downloaded_path or not Path(downloaded_path).exists():
             raise FileNotFoundError("Downloaded file was not found on disk.")
