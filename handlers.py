@@ -619,7 +619,7 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
 
             buttons = [
                 [
-                    InlineKeyboardButton("🗑 Yes, Move to Trash", callback_data=f"del:yes:{item_id}:{parent_id}"),
+                    InlineKeyboardButton("🗑 Yes, Move to Trash", callback_data=f"del:yes:{item_id}"),
                     InlineKeyboardButton("❌ Cancel", callback_data=f"del:no:{parent_id}"),
                 ]
             ]
@@ -645,7 +645,9 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             await callback.answer("❌ Not authorized.", show_alert=True)
             return
 
-        _, _, item_id, parent_id = data.split(":", 3)
+        parts = data.split(":")
+        item_id = parts[2]
+        parent_id = parts[3] if len(parts) > 3 else None
         if item_id == config.DRIVE_FOLDER_ID:
             await callback.answer("❌ The root folder cannot be deleted.", show_alert=True)
             return
@@ -654,6 +656,10 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         try:
             meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, item_id)
             name = meta.get("name", "Item")
+            if not parent_id:
+                parents = meta.get("parents", [])
+                parent_id = parents[0] if parents else config.DRIVE_FOLDER_ID
+
             await asyncio.to_thread(drive_service.default_drive_service.trash_file, item_id)
 
             buttons = [
