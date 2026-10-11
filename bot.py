@@ -80,6 +80,9 @@ def create_app() -> Client:
     app.on_message(filters.command("help") & filters.private & filters.incoming)(handlers.help_command)
     app.on_message(filters.command("status") & filters.private & filters.incoming)(handlers.status_command)
     app.on_message(filters.command(["list", "browse"]) & filters.private & filters.incoming)(handlers.list_command)
+    app.on_message(filters.command(["folders", "folder"]) & (filters.private | filters.group) & filters.incoming)(
+        handlers.folders_command
+    )
     app.on_message(filters.command("setfolder") & filters.private & filters.incoming)(handlers.setfolder_command)
     app.on_message(filters.command("mkdir") & filters.private & filters.incoming)(handlers.mkdir_command)
     app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
@@ -105,7 +108,7 @@ def create_app() -> Client:
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "setfolder", "mkdir", "search", "delete", "cancel", "getfile", "link", "upload", "save"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "cancel", "getfile", "link", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -118,6 +121,7 @@ async def set_menu_commands(app: Client) -> None:
         commands = [
             BotCommand("start", "Open main dashboard menu"),
             BotCommand("list", "Browse Google Drive files and folders"),
+            BotCommand("folders", "View folder hierarchy and structure"),
             BotCommand("setfolder", "Select upload destination folder"),
             BotCommand("mkdir", "Create a new folder in Drive"),
             BotCommand("search", "Search for files in Drive"),

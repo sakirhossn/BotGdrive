@@ -83,15 +83,18 @@ def build_main_menu(user_id: int, user_first_name: str = "User") -> tuple[str, I
                 InlineKeyboardButton("📂 Change Folder", callback_data="nav:select_mode:root"),
             ],
             [
+                InlineKeyboardButton("🗂️ Folder Hierarchy", callback_data="act:folders"),
                 InlineKeyboardButton("➕ Create Folder", callback_data="act:mkdir"),
+            ],
+            [
                 InlineKeyboardButton("🔎 Search Files", callback_data="act:search"),
-            ],
-            [
                 InlineKeyboardButton("🗑 Delete Items", callback_data="act:delete_menu"),
-                InlineKeyboardButton("📤 Group Sharing Info", callback_data="act:group_info"),
             ],
             [
+                InlineKeyboardButton("📤 Group Sharing Info", callback_data="act:group_info"),
                 InlineKeyboardButton("📊 System Status", callback_data="act:status"),
+            ],
+            [
                 InlineKeyboardButton("📖 Help & Guide", callback_data="act:help"),
             ],
         ]
@@ -201,7 +204,8 @@ async def help_command(client: Client, message: Message) -> None:
         "<b>Private Chat Commands:</b>\n"
         "• /start — Open main dashboard menu\n"
         "• /list or /browse — Explore Drive folders & files\n"
-        "• /setfolder — Pick destination folder for your uploads\n"
+        "• /folders or /folder — View folder hierarchy & structure\n"
+        "• /setfolder &lt;name&gt; — Pick destination folder for your uploads\n"
         "• /mkdir &lt;folder_name&gt; — Create a new folder\n"
         "• /search &lt;keyword&gt; — Search files inside Drive\n"
         "• /delete &lt;keyword&gt; — Select files or folders to move to Trash\n"
@@ -316,24 +320,160 @@ async def delete_command(client: Client, message: Message) -> None:
 
 
 @restricted
+async def folders_command(client: Client, message: Message) -> None:
+    """Handle /folders and /folder commands."""
+    cmd_parts = message.text.split(maxsplit=1)
+    cmd = cmd_parts[0].lower().lstrip("/")
+    target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
+
+    # If user ran /folder (singular) without argument:
+    if cmd == "folder" and len(cmd_parts) == 1:
+        target_link = drive_service.default_drive_service.build_drive_link(target_id)
+        buttons = [
+            [InlineKeyboardButton("📂 Change Folder", callback_data="nav:select_mode:root")],
+            [InlineKeyboardButton("📁 Browse Files", callback_data=f"nav:{target_id}")],
+            [InlineKeyboardButton("🗂️ View Full Hierarchy", callback_data="act:folders")],
+            [InlineKeyboardButton("➕ Create Subfolder", callback_data="act:mkdir")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+        ]
+        text = (
+            "📁 <b>Active Upload Destination Folder</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📂 <b>Folder Name:</b> <code>{html.escape(target_name)}</code>\n"
+            f"🆔 <b>Folder ID:</b> <code>{target_id}</code>\n"
+            f"🔗 <a href='{target_link}'>Open in Google Drive</a>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ <i>All files sent to the bot in private chat will be saved here.</i>"
+        )
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+        return
+
+    # If user ran /folders or /folder hierarchy
+    wait_msg = await message.reply_text("🗂️ Scanning Google Drive folder hierarchy...")
+    try:
+        tree = await asyncio.to_thread(drive_service.default_drive_service.get_folder_tree)
+        lines = [
+            "🗂️ <b>Google Drive Folder Hierarchy</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+        buttons = []
+        folder_btn_row = []
+
+        for item in tree:
+            name = item["name"]
+            depth = item["depth"]
+            item_id = item["id"]
+            if depth == 0:
+                is_current = item_id == target_id
+                marker = " 👈 <i>(Active)</i>" if is_current else ""
+                lines.append(f"📁 <b>{html.escape(name)}</b> <i>(Root)</i>{marker}")
+            else:
+                indent = "   " * (depth - 1)
+                is_current = item_id == target_id
+                marker = " 👈 <b>(Active)</b>" if is_current else ""
+                lines.append(f"{indent}└── 📁 <code>{html.escape(name)}</code>{marker}")
+
+                btn_label = utils.truncate_button_text(f"📁 {name}", 20)
+                folder_btn_row.append(InlineKeyboardButton(btn_label, callback_data=f"nav:{item_id}"))
+                if len(folder_btn_row) == 2:
+                    buttons.append(folder_btn_row)
+                    folder_btn_row = []
+
+        if folder_btn_row:
+            buttons.append(folder_btn_row)
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"📌 <b>Active Upload Target:</b> <code>{html.escape(target_name)}</code>")
+        lines.append("💡 <i>Click any folder button to explore or change target:</i>")
+
+        buttons.append([
+            InlineKeyboardButton("📂 Set Target Folder", callback_data="nav:select_mode:root"),
+            InlineKeyboardButton("➕ New Folder", callback_data="act:mkdir"),
+        ])
+        buttons.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+
+        await wait_msg.edit_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        logger.exception("Failed to load folder hierarchy: %s", exc)
+        await wait_msg.edit_text(f"❌ <b>Error loading hierarchy:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+
+
+@restricted
 async def setfolder_command(client: Client, message: Message) -> None:
     """Handle /setfolder command."""
-    wait_msg = await message.reply_text("📂 Opening folder selection...")
-    root_id = config.DRIVE_FOLDER_ID
-    try:
-        folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, root_id)
-        text, markup = build_folder_browser_keyboard(
-            folder_id=root_id,
-            parent_id=None,
-            folders=folders,
-            files=files,
-            page=0,
-            is_select_mode=True,
-        )
-        await wait_msg.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
-    except Exception as exc:
-        logger.exception("Failed to open folder selection: %s", exc)
-        await wait_msg.edit_text(f"❌ <b>Error:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        query = parts[1].strip()
+        wait_msg = await message.reply_text(f"🔍 Searching for folder '<b>{html.escape(query)}</b>'...", parse_mode=ParseMode.HTML)
+        try:
+            matched = await asyncio.to_thread(drive_service.default_drive_service.search_folders, query)
+            if not matched:
+                buttons = [
+                    [InlineKeyboardButton(f"➕ Create '{query}' Folder", callback_data="act:mkdir")],
+                    [InlineKeyboardButton("📂 Browse All Folders", callback_data="nav:select_mode:root")],
+                ]
+                await wait_msg.edit_text(
+                    f"❌ No folder found matching '<b>{html.escape(query)}</b>'.\n\n"
+                    "You can create it now or select from existing folders:",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            if len(matched) == 1:
+                target_folder = matched[0]
+                target_id = target_folder["id"]
+                target_name = target_folder.get("name", "Folder")
+                state_manager.set_upload_folder(message.from_user.id, target_id, target_name)
+                buttons = [
+                    [InlineKeyboardButton(f"📁 Browse {target_name}", callback_data=f"nav:{target_id}")],
+                    [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+                ]
+                await wait_msg.edit_text(
+                    f"✅ <b>Upload Destination Set!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📁 <b>Folder:</b> <code>{html.escape(target_name)}</code>\n"
+                    f"🆔 <b>ID:</b> <code>{target_id}</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "All your future uploads will be saved directly into this folder.",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                buttons = []
+                for f in matched[:6]:
+                    label = utils.truncate_button_text(f"📁 {f['name']}", 30)
+                    buttons.append([InlineKeyboardButton(label, callback_data=f"sel:{f['id']}")])
+                buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="grp_cancel")])
+                await wait_msg.edit_text(
+                    f"📂 <b>Found {len(matched)} matching folders.</b>\nSelect one to set as your upload destination:",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    parse_mode=ParseMode.HTML,
+                )
+        except Exception as exc:
+            logger.exception("Failed to search folder: %s", exc)
+            await wait_msg.edit_text(f"❌ Error searching folder: {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+    else:
+        wait_msg = await message.reply_text("📂 Opening folder selection...")
+        root_id = config.DRIVE_FOLDER_ID
+        try:
+            folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, root_id)
+            text, markup = build_folder_browser_keyboard(
+                folder_id=root_id,
+                parent_id=None,
+                folders=folders,
+                files=files,
+                page=0,
+                is_select_mode=True,
+            )
+            await wait_msg.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            logger.exception("Failed to open folder selection: %s", exc)
+            await wait_msg.edit_text(f"❌ <b>Error:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
 
 
 @restricted
@@ -347,9 +487,14 @@ async def mkdir_command(client: Client, message: Message) -> None:
         try:
             created = await asyncio.to_thread(drive_service.default_drive_service.create_folder, folder_name, target_id)
             link = created.get("webViewLink") or drive_service.default_drive_service.build_drive_link(created["id"])
+            buttons = [
+                [InlineKeyboardButton("🎯 Set as Upload Target", callback_data=f"sel:{created['id']}")],
+                [InlineKeyboardButton(f"📁 Browse {folder_name}", callback_data=f"nav:{created['id']}")],
+            ]
             await wait_msg.edit_text(
-                f"✅ Folder <b>{html.escape(folder_name)}</b> created successfully!\n\n"
+                f"✅ Folder <b>{html.escape(folder_name)}</b> created successfully in <b>{html.escape(target_name)}</b>!\n\n"
                 f"🔗 <a href='{link}'>View in Google Drive</a>",
+                reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=ParseMode.HTML,
             )
         except Exception as exc:
@@ -747,6 +892,11 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         await help_command(client, callback.message)
         return
 
+    if data == "act:folders":
+        await callback.answer("Loading folder hierarchy...")
+        await folders_command(client, callback.message)
+        return
+
     if data == "act:mkdir":
         state_manager.set_user_action(user_id, "awaiting_folder_name")
         await callback.message.reply_text("📝 Please send the name for the new folder, or /cancel to abort:")
@@ -860,9 +1010,14 @@ async def text_handler(client: Client, message: Message) -> None:
         try:
             created = await asyncio.to_thread(drive_service.default_drive_service.create_folder, folder_name, target_id)
             link = created.get("webViewLink") or drive_service.default_drive_service.build_drive_link(created["id"])
+            buttons = [
+                [InlineKeyboardButton("🎯 Set as Upload Target", callback_data=f"sel:{created['id']}")],
+                [InlineKeyboardButton(f"📁 Browse {folder_name}", callback_data=f"nav:{created['id']}")],
+            ]
             await wait_msg.edit_text(
-                f"✅ Folder <b>{html.escape(folder_name)}</b> created successfully!\n\n"
+                f"✅ Folder <b>{html.escape(folder_name)}</b> created successfully in <b>{html.escape(target_name)}</b>!\n\n"
                 f"🔗 <a href='{link}'>View in Google Drive</a>",
+                reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=ParseMode.HTML,
             )
         except Exception as exc:

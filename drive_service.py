@@ -209,6 +209,60 @@ class DriveService:
                 matched.append(f)
         return matched
 
+    def search_folders(self, keyword: str) -> List[Dict[str, Any]]:
+        """Search folders by name within the managed hierarchy."""
+        safe_keyword = keyword.replace("'", "\\'")
+        query = f"name contains '{safe_keyword}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        fields = "files(id, name, mimeType, parents, webViewLink, trashed)"
+
+        response = self.service.files().list(
+            q=query,
+            spaces="drive",
+            fields=fields,
+            pageSize=50,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+
+        raw_folders = response.get("files", [])
+        matched: List[Dict[str, Any]] = []
+        for f in raw_folders:
+            if self.is_within_managed_root(f["id"]):
+                matched.append(f)
+        return matched
+
+    def get_folder_tree(self, root_id: Optional[str] = None, max_depth: int = 4) -> List[Dict[str, Any]]:
+        """Traverse folder hierarchy up to max_depth and return list of folders with depth level."""
+        target_root = root_id or self.root_folder_id
+        root_meta = self.get_metadata(target_root)
+
+        tree: List[Dict[str, Any]] = [
+            {"id": target_root, "name": root_meta.get("name", "Root"), "depth": 0, "parent": None}
+        ]
+
+        visited = {target_root}
+
+        def _walk(parent_id: str, depth: int):
+            if depth >= max_depth:
+                return
+            subfolders = self.list_folders(parent_id)
+            for sf in subfolders:
+                sf_id = sf["id"]
+                if sf_id in visited:
+                    continue
+                visited.add(sf_id)
+                tree.append({
+                    "id": sf_id,
+                    "name": sf.get("name", "Untitled Folder"),
+                    "depth": depth + 1,
+                    "parent": parent_id,
+                    "webViewLink": sf.get("webViewLink"),
+                })
+                _walk(sf_id, depth + 1)
+
+        _walk(target_root, 0)
+        return tree
+
     def create_folder(self, name: str, parent_id: str) -> Dict[str, Any]:
         """Create a new folder inside parent_id."""
         if not self.is_within_managed_root(parent_id):
