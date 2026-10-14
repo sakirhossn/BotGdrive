@@ -39,6 +39,11 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK - BotGdrive 2GB Active\n")
 
+    def do_HEAD(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+
     def log_message(self, format: str, *args: object) -> None:
         # Suppress verbose HTTP access logs
         pass
@@ -101,7 +106,9 @@ def create_app() -> Client:
 
     # Media Handler for 2 GB MTProto transfers in Private Chats
     app.on_message(
-        (filters.document | filters.video | filters.audio | filters.photo) & filters.private & filters.incoming
+        (filters.document | filters.video | filters.audio | filters.photo | filters.animation | filters.voice | filters.video_note)
+        & filters.private
+        & filters.incoming
     )(handlers.media_handler)
 
     # Text Handler for conversational inputs (search, mkdir name)
@@ -138,9 +145,29 @@ async def set_menu_commands(app: Client) -> None:
         logger.warning("Could not set bot commands: %s", exc)
 
 
+def cleanup_downloads_dir() -> None:
+    """Purge orphaned temporary files from previous runs to conserve ephemeral storage."""
+    try:
+        count = 0
+        for item in config.DOWNLOADS_DIR.glob("*"):
+            if item.is_file():
+                try:
+                    item.unlink(missing_ok=True)
+                    count += 1
+                except Exception as exc:
+                    logger.warning("Could not delete orphan file %s: %s", item.name, exc)
+        if count > 0:
+            logger.info("Cleaned up %d orphaned temporary files from downloads directory.", count)
+    except Exception as exc:
+        logger.warning("Error during downloads directory cleanup: %s", exc)
+
+
 def main() -> None:
     """Main entrypoint."""
     logger.info("Initializing BotGdrive (2 GB MTProto Google Drive Bot)...")
+
+    # Purge any leftover files on ephemeral disk
+    cleanup_downloads_dir()
 
     # Start Render health server
     start_health_server(config.PORT)

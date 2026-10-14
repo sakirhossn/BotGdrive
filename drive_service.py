@@ -13,6 +13,7 @@ import socket
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -23,7 +24,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Set 120s socket timeout to prevent read operation timeouts on large chunk transfers
+# Configure httplib2 and socket timeouts to prevent hanging sockets
+httplib2.RETRIES = 3
 socket.setdefaulttimeout(120)
 
 SCOPES: list[str] = ["https://www.googleapis.com/auth/drive"]
@@ -92,6 +94,21 @@ class DriveService:
         if self._service is None:
             self.authenticate()
         return self._service
+
+    def _reset_http_connections(self) -> None:
+        """Clear cached httplib2 connections to prevent dead socket reuse after timeout."""
+        try:
+            inner = getattr(self.service._http, "http", self.service._http)
+            if hasattr(inner, "connections"):
+                for conn in list(inner.connections.values()):
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                inner.connections.clear()
+                logger.debug("Cleared httplib2 connection pool for clean retry.")
+        except Exception as exc:
+            logger.debug("Could not reset HTTP connections: %s", exc)
 
     def get_root_folder(self) -> Dict[str, Any]:
         """Fetch metadata for the configured root folder and verify accessibility."""
@@ -340,12 +357,13 @@ class DriveService:
                 retries = 0
             except (socket.timeout, TimeoutError, OSError, Exception) as exc:
                 if "timed out" in str(exc).lower() or isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+                    self._reset_http_connections()
                     retries += 1
                     if retries > max_retries:
                         logger.error("Exceeded max retries (%d) during resumable upload: %s", max_retries, exc)
                         raise
                     wait_time = retries * 2
-                    logger.warning("Upload chunk timeout (%s). Resuming in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
+                    logger.warning("Upload chunk timeout (%s). Resuming with fresh socket in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
                     time.sleep(wait_time)
                     continue
                 raise
@@ -387,12 +405,13 @@ class DriveService:
                     retries = 0
                 except (socket.timeout, TimeoutError, OSError, Exception) as exc:
                     if "timed out" in str(exc).lower() or isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+                        self._reset_http_connections()
                         retries += 1
                         if retries > max_retries:
                             logger.error("Exceeded max retries (%d) during Drive download: %s", max_retries, exc)
                             raise
                         wait_time = retries * 2
-                        logger.warning("Download chunk timeout (%s). Retrying in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
+                        logger.warning("Download chunk timeout (%s). Retrying with fresh socket in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
                         time.sleep(wait_time)
                         continue
                     raise

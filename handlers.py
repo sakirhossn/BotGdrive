@@ -23,6 +23,10 @@ import utils
 
 logger = logging.getLogger(__name__)
 
+# Sequential transfer semaphore to prevent concurrent transfers from exhausting 512 MB RAM / 1.5 GB ephemeral disk on Render Free Tier
+TRANSFER_SEMAPHORE = asyncio.Semaphore(1)
+_QUEUE_COUNT = 0
+
 
 async def is_authorized_user(client: Client, message: Message) -> bool:
     """Check if user is authorized in private chat or is an admin/owner in group."""
@@ -1183,6 +1187,21 @@ async def media_handler(client: Client, message: Message) -> None:
         filename = f"photo_{message.id}.jpg"
         file_size = photo.file_size or 0
         mime_type = "image/jpeg"
+    elif message.animation:
+        anim = message.animation
+        filename = anim.file_name or f"animation_{message.id}.mp4"
+        file_size = anim.file_size or 0
+        mime_type = anim.mime_type or "video/mp4"
+    elif message.voice:
+        vce = message.voice
+        filename = f"voice_{message.id}.ogg"
+        file_size = vce.file_size or 0
+        mime_type = vce.mime_type or "audio/ogg"
+    elif message.video_note:
+        vn = message.video_note
+        filename = f"videonote_{message.id}.mp4"
+        file_size = vn.file_size or 0
+        mime_type = "video/mp4"
     else:
         return
 
@@ -1190,119 +1209,160 @@ async def media_handler(client: Client, message: Message) -> None:
     target_id, target_name = state_manager.get_upload_folder(user.id)
     start_time = time.time()
 
-    status_msg = await message.reply_text(
-        "⚡ <b>Initiating Transfer...</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
-        f"📦 <b>Size:</b> {utils.format_file_size(file_size)}\n"
-        f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
-        "━━━━━━━━━━━━━━━━━━━━",
-        parse_mode=ParseMode.HTML,
-    )
+    global _QUEUE_COUNT
+    is_queued = TRANSFER_SEMAPHORE.locked()
+    if is_queued:
+        _QUEUE_COUNT += 1
+        pos = _QUEUE_COUNT
+        status_msg = await message.reply_text(
+            "⏳ <b>Transfer Queued</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+            f"📦 <b>Size:</b> {utils.format_file_size(file_size)}\n"
+            f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
+            f"🔄 <b>Queue Position:</b> #{pos}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Will start automatically when active transfer completes.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        status_msg = await message.reply_text(
+            "⚡ <b>Initiating Transfer...</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+            f"📦 <b>Size:</b> {utils.format_file_size(file_size)}\n"
+            f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━",
+            parse_mode=ParseMode.HTML,
+        )
 
     unique_id = uuid.uuid4().hex[:8]
     local_dest = config.DOWNLOADS_DIR / f"{unique_id}_{safe_name}"
 
-    dl_tracker = utils.ProgressTracker(
-        action_name="📥 Downloading from Telegram",
-        filename=safe_name,
-        total_bytes=file_size,
-        target_folder=target_name,
-        update_interval=3.5,
-    )
-
-    async def dl_progress(current: int, total: int) -> None:
-        if dl_tracker.should_update():
-            card = dl_tracker.format_status(current)
+    async with TRANSFER_SEMAPHORE:
+        if is_queued:
+            _QUEUE_COUNT = max(0, _QUEUE_COUNT - 1)
+            start_time = time.time()
             try:
-                await status_msg.edit_text(card, parse_mode=ParseMode.HTML)
-            except MessageNotModified:
-                pass
-            except FloodWait as fw:
-                await asyncio.sleep(fw.value)
-            except Exception as e:
-                logger.debug("Download progress edit error: %s", e)
-
-    try:
-        # Step 1: Download via MTProto with retry
-        downloaded_path = None
-        for dl_attempt in range(1, 3):
-            try:
-                logger.info("Starting MTProto download for '%s' (attempt %d/2, size=%s)", safe_name, dl_attempt, file_size)
-                downloaded_path = await client.download_media(
-                    message=message,
-                    file_name=str(local_dest),
-                    progress=dl_progress,
+                await status_msg.edit_text(
+                    "⚡ <b>Starting Transfer...</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+                    f"📦 <b>Size:</b> {utils.format_file_size(file_size)}\n"
+                    f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    parse_mode=ParseMode.HTML,
                 )
-                if downloaded_path and Path(downloaded_path).exists():
-                    break
-            except Exception as dl_err:
-                if dl_attempt < 2 and ("timed out" in str(dl_err).lower() or isinstance(dl_err, (TimeoutError, ConnectionError))):
-                    logger.warning("MTProto download timed out on attempt 1: %s. Retrying in 2s...", dl_err)
-                    await asyncio.sleep(2)
-                    continue
-                raise
+            except Exception:
+                pass
 
-        if not downloaded_path or not Path(downloaded_path).exists():
-            raise FileNotFoundError("Downloaded file was not found on disk.")
-
-        actual_size = Path(downloaded_path).stat().st_size
-        logger.info("Downloaded '%s' (%s bytes). Uploading to Drive...", safe_name, actual_size)
-
-        # Step 2: Upload to Google Drive
-        loop = asyncio.get_running_loop()
-        up_tracker = utils.ProgressTracker(
-            action_name="☁️ Uploading to Google Drive",
+        dl_tracker = utils.ProgressTracker(
+            action_name="📥 Downloading from Telegram",
             filename=safe_name,
-            total_bytes=actual_size,
+            total_bytes=file_size,
             target_folder=target_name,
             update_interval=3.5,
         )
 
-        def up_progress(current_bytes: int, total_bytes: int) -> None:
-            if up_tracker.should_update():
-                card = up_tracker.format_status(current_bytes)
+        async def dl_progress(current: int, total: int) -> None:
+            if dl_tracker.should_update():
+                card = dl_tracker.format_status(current)
+                try:
+                    await status_msg.edit_text(card, parse_mode=ParseMode.HTML)
+                except MessageNotModified:
+                    pass
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value)
+                except Exception as e:
+                    logger.debug("Download progress edit error: %s", e)
 
-                async def _update() -> None:
-                    try:
-                        await status_msg.edit_text(card, parse_mode=ParseMode.HTML)
-                    except MessageNotModified:
-                        pass
-                    except Exception as e:
-                        logger.debug("Upload progress edit error: %s", e)
+        try:
+            # Step 1: Download via MTProto with retry
+            downloaded_path = None
+            for dl_attempt in range(1, 3):
+                try:
+                    logger.info("Starting MTProto download for '%s' (attempt %d/2, size=%s)", safe_name, dl_attempt, file_size)
+                    downloaded_path = await client.download_media(
+                        message=message,
+                        file_name=str(local_dest),
+                        progress=dl_progress,
+                    )
+                    if downloaded_path and Path(downloaded_path).exists():
+                        break
+                except Exception as dl_err:
+                    if dl_attempt < 2 and ("timed out" in str(dl_err).lower() or isinstance(dl_err, (TimeoutError, ConnectionError))):
+                        logger.warning("MTProto download timed out on attempt 1: %s. Retrying in 2s...", dl_err)
+                        await asyncio.sleep(2)
+                        continue
+                    raise
 
-                asyncio.run_coroutine_threadsafe(_update(), loop)
+            if not downloaded_path or not Path(downloaded_path).exists():
+                raise FileNotFoundError("Downloaded file was not found on disk.")
 
-        uploaded = await asyncio.to_thread(
-            drive_service.default_drive_service.upload_file,
-            local_path=downloaded_path,
-            filename=safe_name,
-            mime_type=mime_type,
-            folder_id=target_id,
-            progress_callback=up_progress,
-        )
+            actual_size = Path(downloaded_path).stat().st_size
+            logger.info("Downloaded '%s' (%s bytes). Uploading to Drive...", safe_name, actual_size)
 
-        view_link = uploaded.get("webViewLink") or drive_service.default_drive_service.build_drive_link(uploaded["id"])
-        elapsed = time.time() - start_time
+            # Step 2: Upload to Google Drive
+            loop = asyncio.get_running_loop()
+            up_tracker = utils.ProgressTracker(
+                action_name="☁️ Uploading to Google Drive",
+                filename=safe_name,
+                total_bytes=actual_size,
+                target_folder=target_name,
+                update_interval=3.5,
+            )
 
-        completion_card = utils.format_completion_card(
-            filename=uploaded.get("name", safe_name),
-            file_size=actual_size,
-            folder_name=target_name,
-            elapsed_seconds=elapsed,
-            view_link=view_link,
-        )
+            def up_progress(current_bytes: int, total_bytes: int) -> None:
+                if up_tracker.should_update():
+                    card = up_tracker.format_status(current_bytes)
 
-        await status_msg.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-        logger.info("Completed full transfer for '%s' in %.1fs", safe_name, elapsed)
+                    async def _update() -> None:
+                        try:
+                            await status_msg.edit_text(card, parse_mode=ParseMode.HTML)
+                        except MessageNotModified:
+                            pass
+                        except Exception as e:
+                            logger.debug("Upload progress edit error: %s", e)
 
-    except Exception as exc:
-        logger.exception("Media transfer failed for '%s': %s", safe_name, exc)
-        await status_msg.edit_text(
-            f"❌ <b>Transfer Failed:</b>\n\n<code>{html.escape(str(exc))}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-    finally:
-        if local_dest.exists():
-            local_dest.unlink(missing_ok=True)
-            logger.info("Cleaned up temporary file '%s'", local_dest)
+                    asyncio.run_coroutine_threadsafe(_update(), loop)
+
+            uploaded = await asyncio.to_thread(
+                drive_service.default_drive_service.upload_file,
+                local_path=downloaded_path,
+                filename=safe_name,
+                mime_type=mime_type,
+                folder_id=target_id,
+                progress_callback=up_progress,
+            )
+
+            view_link = uploaded.get("webViewLink") or drive_service.default_drive_service.build_drive_link(uploaded["id"])
+            elapsed = time.time() - start_time
+
+            completion_card = utils.format_completion_card(
+                filename=uploaded.get("name", safe_name),
+                file_size=actual_size,
+                folder_name=target_name,
+                elapsed_seconds=elapsed,
+                view_link=view_link,
+            )
+
+            try:
+                await status_msg.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value)
+                await status_msg.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+            logger.info("Completed full transfer for '%s' in %.1fs", safe_name, elapsed)
+
+        except Exception as exc:
+            logger.exception("Media transfer failed for '%s': %s", safe_name, exc)
+            try:
+                await status_msg.edit_text(
+                    f"❌ <b>Transfer Failed:</b>\n\n<code>{html.escape(str(exc))}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+        finally:
+            if local_dest.exists():
+                local_dest.unlink(missing_ok=True)
+                logger.info("Cleaned up temporary file '%s'", local_dest)
