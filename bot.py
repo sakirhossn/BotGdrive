@@ -92,13 +92,13 @@ def create_app() -> Client:
     app.on_message(filters.command("mkdir") & filters.private & filters.incoming)(handlers.mkdir_command)
     app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
     app.on_message(filters.command("delete") & filters.private & filters.incoming)(handlers.delete_command)
-    app.on_message(filters.command("url") & filters.private & filters.incoming)(handlers.url_command)
+    app.on_message(filters.command(["url", "download", "dl"]) & filters.private & filters.incoming)(handlers.url_command)
     app.on_message(filters.command("settoken") & filters.private & filters.incoming)(handlers.settoken_command)
     app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
     # Group & Private Commands (for Admins / Whitelisted)
     app.on_message(filters.command("getfile") & (filters.private | filters.group) & filters.incoming)(handlers.getfile_command)
-    app.on_message(filters.command("link") & (filters.private | filters.group) & filters.incoming)(handlers.link_command)
+    app.on_message(filters.command(["link", "links"]) & (filters.private | filters.group) & filters.incoming)(handlers.link_command)
     app.on_message(filters.command(["upload", "save"]) & filters.reply & (filters.private | filters.group) & filters.incoming)(
         handlers.upload_reply_command
     )
@@ -117,7 +117,7 @@ def create_app() -> Client:
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "settoken", "cancel", "getfile", "link", "upload", "save"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "download", "dl", "settoken", "cancel", "getfile", "link", "links", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -130,6 +130,7 @@ async def set_menu_commands(app: Client) -> None:
         commands = [
             BotCommand("start", "Open main dashboard menu"),
             BotCommand("url", "Download file from a public URL to Drive"),
+            BotCommand("download", "Download file from link (/download <url>)"),
             BotCommand("list", "Browse Google Drive files and folders"),
             BotCommand("folders", "View folder hierarchy and structure"),
             BotCommand("setfolder", "Select upload destination folder"),
@@ -138,6 +139,7 @@ async def set_menu_commands(app: Client) -> None:
             BotCommand("delete", "Delete file or folder safely to Trash"),
             BotCommand("getfile", "Deliver a Drive file into the chat (up to 2GB)"),
             BotCommand("link", "Share Google Drive link into chat"),
+            BotCommand("links", "Search and share Drive file links"),
             BotCommand("status", "Check bot and Drive connection status"),
             BotCommand("help", "Show commands and guide"),
             BotCommand("cancel", "Cancel current operation"),

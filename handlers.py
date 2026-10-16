@@ -97,18 +97,19 @@ def build_main_menu(user_id: int, user_first_name: str = "User") -> tuple[str, I
                 InlineKeyboardButton("📂 Change Folder", callback_data="nav:select_mode:root"),
             ],
             [
-                InlineKeyboardButton("🗂️ Folder Hierarchy", callback_data="act:folders"),
+                InlineKeyboardButton("🔗 Download from URL", callback_data="act:url_prompt"),
                 InlineKeyboardButton("➕ Create Folder", callback_data="act:mkdir"),
             ],
             [
+                InlineKeyboardButton("🗂️ Folder Hierarchy", callback_data="act:folders"),
                 InlineKeyboardButton("🔎 Search Files", callback_data="act:search"),
-                InlineKeyboardButton("🗑 Delete Items", callback_data="act:delete_menu"),
             ],
             [
-                InlineKeyboardButton("📤 Group Sharing Info", callback_data="act:group_info"),
+                InlineKeyboardButton("🗑 Delete Items", callback_data="act:delete_menu"),
                 InlineKeyboardButton("📊 System Status", callback_data="act:status"),
             ],
             [
+                InlineKeyboardButton("📤 Group Sharing Info", callback_data="act:group_info"),
                 InlineKeyboardButton("📖 Help & Guide", callback_data="act:help"),
             ],
         ]
@@ -218,7 +219,7 @@ async def help_command(client: Client, message: Message) -> None:
         "• Auto cleanup immediately after Drive confirmation.\n\n"
         "<b>Private Chat Commands:</b>\n"
         "• /start — Open main dashboard menu\n"
-        "• /url &lt;link&gt; — Download from a public file link directly to Drive\n"
+        "• /url or /download &lt;link&gt; — Download from a public file link directly to Drive\n"
         "• /list or /browse — Explore Drive folders & files\n"
         "• /folders or /folder — View folder hierarchy & structure\n"
         "• /setfolder &lt;name&gt; — Pick destination folder for your uploads\n"
@@ -226,10 +227,11 @@ async def help_command(client: Client, message: Message) -> None:
         "• /search &lt;keyword&gt; — Search files inside Drive\n"
         "• /delete &lt;keyword&gt; — Select files or folders to move to Trash\n"
         "• /status — Check bot health, MTProto and Drive status\n"
+        "• /settoken — Hot-reload Google Drive OAuth token\n"
         "• /cancel — Cancel any active interactive prompt\n\n"
-        "<b>Group Commands (for Admins / Owner):</b>\n"
-        "• /getfile &lt;keyword&gt; — Fetch file from Drive and post directly into the group\n"
-        "• /link &lt;keyword&gt; — Post direct Google Drive link into group\n"
+        "<b>Group & Search Commands:</b>\n"
+        "• /getfile &lt;keyword&gt; — Fetch file from Drive and post directly into the chat\n"
+        "• /link or /links &lt;keyword&gt; — Search & post direct Google Drive file link\n"
         "• Reply with /upload or /save — Save any group file into Drive\n"
         "━━━━━━━━━━━━━━━━━━━━"
     )
@@ -1179,6 +1181,20 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             await callback.answer(f"❌ Error: {exc}", show_alert=True)
         return
 
+    # URL Downloader Prompt from Main Menu
+    if data == "act:url_prompt":
+        state_manager.set_user_action(user_id, {"action": "awaiting_url"})
+        await callback.answer()
+        await callback.message.reply_text(
+            "🔗 <b>Download from Public URL:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Please paste or send the direct download link into this chat.\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Tip: Send /cancel at any time to cancel.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     # URL Downloader Cancel
     if data.startswith("act:url_cancel:"):
         task_id = data.split(":", 2)[2]
@@ -1411,12 +1427,17 @@ async def handle_incoming_url(client: Client, message: Message, url: str) -> Non
 
 @restricted
 async def url_command(client: Client, message: Message) -> None:
-    """Handle /url <link> to download a file from a public URL to Google Drive."""
+    """Handle /url, /download, /dl <link> to download a file from a public URL to Google Drive."""
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
+        state_manager.set_user_action(message.from_user.id, {"action": "awaiting_url"})
         await message.reply_text(
-            "💡 <b>Usage:</b> <code>/url &lt;public_file_link&gt;</code>\n\n"
-            "Or simply paste any direct HTTP/HTTPS link into the chat!",
+            "🔗 <b>Download from Public URL:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Please paste or send the direct download link into this chat.\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Tip: You can also use:</i> <code>/url &lt;link&gt;</code> or <code>/download &lt;link&gt;</code>\n"
+            "<i>Send /cancel to abort.</i>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -1439,6 +1460,16 @@ async def text_handler(client: Client, message: Message) -> None:
         return
 
     action = user_action.get("action")
+
+    if action == "awaiting_url":
+        state_manager.clear_user_action(message.from_user.id)
+        text = (message.text or "").strip()
+        url_match = re.search(r"https?://[^\s]+", text)
+        if url_match:
+            await handle_incoming_url(client, message, url_match.group(0))
+        else:
+            await message.reply_text("❌ No valid HTTP/HTTPS link detected. Please send a valid link or send /cancel.")
+        return
 
     if action == "awaiting_folder_name":
         folder_name = message.text.strip()
