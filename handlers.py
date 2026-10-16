@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import html
+import json
 import logging
 import re
 import time
@@ -239,27 +240,35 @@ async def help_command(client: Client, message: Message) -> None:
 async def status_command(client: Client, message: Message) -> None:
     """Handle /status command."""
     status_msg = await message.reply_text("🔍 Checking system status...")
+    drive_connected = False
+    root_name = "Unavailable"
     try:
         root_meta = await asyncio.to_thread(drive_service.default_drive_service.get_root_folder)
         root_name = root_meta.get("name", "Unknown")
-        target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
+        drive_connected = True
+    except Exception as drive_exc:
+        logger.warning("Drive not connected in status check: %s", drive_exc)
+        root_name = "⚠️ Disconnected (Token Expired)"
 
-        dl_size = sum(f.stat().st_size for f in config.DOWNLOADS_DIR.glob("**/*") if f.is_file())
+    target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
+    dl_size = sum(f.stat().st_size for f in config.DOWNLOADS_DIR.glob("**/*") if f.is_file())
 
-        text = (
-            "📊 <b>System & Service Status</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 <b>MTProto Protocol:</b> Connected (2 GB Support Active)\n"
-            f"🟢 <b>Google Drive API:</b> Connected\n"
-            f"📁 <b>Drive Root Folder:</b> <code>{html.escape(root_name)}</code>\n"
-            f"📌 <b>Active Upload Destination:</b> <code>{html.escape(target_name)}</code>\n"
-            f"💾 <b>Local Cache Usage:</b> {utils.format_file_size(dl_size)}\n"
-            "━━━━━━━━━━━━━━━━━━━━"
-        )
-        await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
-    except Exception as exc:
-        logger.exception("Status check failed: %s", exc)
-        await status_msg.edit_text(f"❌ <b>Error checking status:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
+    drive_status_line = (
+        f"🟢 <b>Google Drive API:</b> Connected\n📁 <b>Drive Root Folder:</b> <code>{html.escape(root_name)}</code>\n"
+        if drive_connected
+        else "🔴 <b>Google Drive API:</b> Disconnected (Token Expired)\n💡 <i>Send /settoken to re-authenticate</i>\n"
+    )
+
+    text = (
+        "📊 <b>System & Service Status</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 <b>MTProto Protocol:</b> Connected (2 GB Support Active)\n"
+        f"{drive_status_line}"
+        f"📌 <b>Active Upload Destination:</b> <code>{html.escape(target_name)}</code>\n"
+        f"💾 <b>Local Cache Usage:</b> {utils.format_file_size(dl_size)}\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+    await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 
 @restricted
@@ -560,6 +569,65 @@ async def cancel_command(client: Client, message: Message) -> None:
     """Handle /cancel command."""
     state_manager.clear_user_action(message.from_user.id)
     await message.reply_text("✅ Action cancelled.")
+
+
+@restricted
+async def settoken_command(client: Client, message: Message) -> None:
+    """Hot-reload Google Drive OAuth token from message text or attached token.json document."""
+    raw_content = ""
+    if message.reply_to_message and message.reply_to_message.document:
+        doc = message.reply_to_message.document
+        if doc.file_name and "token" in doc.file_name.lower():
+            downloaded = await message.reply_to_message.download(in_memory=True)
+            raw_content = bytes(downloaded.getbuffer()).decode("utf-8")
+    elif message.document and message.document.file_name and "token" in message.document.file_name.lower():
+        downloaded = await message.download(in_memory=True)
+        raw_content = bytes(downloaded.getbuffer()).decode("utf-8")
+    else:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
+            raw_content = parts[1].strip()
+
+    if not raw_content:
+        await message.reply_text(
+            "🔑 <b>Google Drive Token Updater:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "• Send <code>/settoken &lt;token_json&gt;</code>\n"
+            "• Or send <code>token.json</code> as a file and reply with <code>/settoken</code>.\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>This will hot-reload your Drive connection immediately without restarting Render.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    try:
+        token_data = json.loads(raw_content)
+        if "token" not in token_data and "refresh_token" not in token_data:
+            raise ValueError("JSON does not appear to be a valid Google OAuth token (missing 'token' or 'refresh_token').")
+
+        # Save to token.json
+        with open(config.TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(json.dumps(token_data, indent=2))
+
+        # Re-authenticate Drive service
+        drive_service.default_drive_service._service = None
+        root = await asyncio.to_thread(drive_service.default_drive_service.get_root_folder)
+
+        await message.reply_text(
+            "✅ <b>Google Drive Connected Successfully!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📁 <b>Root Folder:</b> <code>{html.escape(root.get('name', 'Root'))}</code>\n"
+            f"🆔 <b>Folder ID:</b> <code>{html.escape(root.get('id', ''))}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🎉 <i>All uploads and Drive browsing features are now fully active!</i>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        logger.exception("Failed to update token: %s", exc)
+        await message.reply_text(
+            f"❌ <b>Token Activation Failed:</b>\n\n<code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 # ---------------- GROUP SHARING COMMANDS ---------------- #

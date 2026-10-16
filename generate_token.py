@@ -53,9 +53,7 @@ def main() -> None:
 
     try:
         flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
-        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-        print(f"[LINK] If the browser doesn't open automatically, copy & open this URL:\n{auth_url}\n", flush=True)
-        creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
+        creds = flow.run_local_server(port=8085, prompt="consent", access_type="offline")
     except Exception as exc:
         print(f"\n[ERROR] OAuth authorization failed: {exc}", flush=True)
         sys.exit(1)

@@ -93,6 +93,7 @@ def create_app() -> Client:
     app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
     app.on_message(filters.command("delete") & filters.private & filters.incoming)(handlers.delete_command)
     app.on_message(filters.command("url") & filters.private & filters.incoming)(handlers.url_command)
+    app.on_message(filters.command("settoken") & filters.private & filters.incoming)(handlers.settoken_command)
     app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
     # Group & Private Commands (for Admins / Whitelisted)
@@ -116,7 +117,7 @@ def create_app() -> Client:
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "cancel", "getfile", "link", "upload", "save"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "settoken", "cancel", "getfile", "link", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -183,8 +184,11 @@ def main() -> None:
             root_folder.get("id"),
         )
     except Exception as exc:
-        logger.error("Failed to connect to Google Drive: %s", exc)
-        sys.exit(1)
+        logger.warning(
+            "⚠️ Google Drive API not connected on startup: %s. "
+            "Bot is starting in Safe Mode. Send /settoken in Telegram or update TOKEN_JSON_CONTENT in Render.",
+            exc,
+        )
 
     app = create_app()
 
