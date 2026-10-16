@@ -92,6 +92,7 @@ def create_app() -> Client:
     app.on_message(filters.command("mkdir") & filters.private & filters.incoming)(handlers.mkdir_command)
     app.on_message(filters.command("search") & filters.private & filters.incoming)(handlers.search_command)
     app.on_message(filters.command("delete") & filters.private & filters.incoming)(handlers.delete_command)
+    app.on_message(filters.command("url") & filters.private & filters.incoming)(handlers.url_command)
     app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
     # Group & Private Commands (for Admins / Whitelisted)
@@ -111,11 +112,11 @@ def create_app() -> Client:
         & filters.incoming
     )(handlers.media_handler)
 
-    # Text Handler for conversational inputs (search, mkdir name)
+    # Text Handler for conversational inputs (search, mkdir name, pasted links)
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "cancel", "getfile", "link", "upload", "save"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "cancel", "getfile", "link", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -127,6 +128,7 @@ async def set_menu_commands(app: Client) -> None:
     try:
         commands = [
             BotCommand("start", "Open main dashboard menu"),
+            BotCommand("url", "Download file from a public URL to Drive"),
             BotCommand("list", "Browse Google Drive files and folders"),
             BotCommand("folders", "View folder hierarchy and structure"),
             BotCommand("setfolder", "Select upload destination folder"),

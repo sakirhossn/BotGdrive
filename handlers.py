@@ -6,6 +6,7 @@ import asyncio
 import functools
 import html
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -19,6 +20,7 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 import config
 import drive_service
 from state_manager import state_manager
+import url_service
 import utils
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,7 @@ def build_main_menu(user_id: int, user_first_name: str = "User") -> tuple[str, I
         f"📁 <b>Target Folder:</b> <code>{html.escape(folder_name)}</code>\n"
         "🟢 <b>Status:</b> 24/7 Cloud Linked\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <i>Tip: Send or forward any video, audio, or document to upload to Drive.</i>\n"
+        "💡 <i>Tip: Send media files or paste any public download link to upload to Drive.</i>\n"
         "<i>In groups, Admins can use <code>/getfile</code> to share files from Drive!</i>"
     )
     keyboard = InlineKeyboardMarkup(
@@ -210,10 +212,12 @@ async def help_command(client: Client, message: Message) -> None:
         "━━━━━━━━━━━━━━━━━━━━\n"
         "<b>Direct Large File Transfers (up to 2,000 MB):</b>\n"
         "• Forward or upload any Document, Video, or Audio.\n"
+        "• Paste any public download link (or use /url &lt;link&gt;).\n"
         "• Real-time progress updates with speed and ETA.\n"
         "• Auto cleanup immediately after Drive confirmation.\n\n"
         "<b>Private Chat Commands:</b>\n"
         "• /start — Open main dashboard menu\n"
+        "• /url &lt;link&gt; — Download from a public file link directly to Drive\n"
         "• /list or /browse — Explore Drive folders & files\n"
         "• /folders or /folder — View folder hierarchy & structure\n"
         "• /setfolder &lt;name&gt; — Pick destination folder for your uploads\n"
@@ -1107,16 +1111,261 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             await callback.answer(f"❌ Error: {exc}", show_alert=True)
         return
 
+    # URL Downloader Cancel
+    if data.startswith("act:url_cancel:"):
+        task_id = data.split(":", 2)[2]
+        url_service.pop_pending_task(task_id)
+        await callback.message.edit_text("❌ <b>Link transfer canceled.</b>", parse_mode=ParseMode.HTML)
+        await callback.answer("Canceled.")
+        return
+
+    # URL Downloader Execute
+    if data.startswith("act:url_dl:"):
+        task_id = data.split(":", 2)[2]
+        task = url_service.pop_pending_task(task_id)
+        if not task:
+            await callback.answer("❌ This link request has expired. Please re-send the link.", show_alert=True)
+            return
+
+        await callback.answer("Starting URL transfer...")
+        safe_name = utils.sanitize_filename(task["filename"])
+        file_size = task.get("size_bytes", 0)
+        target_name = task.get("target_name", "Root")
+        target_id = task.get("target_id") or config.DRIVE_FOLDER_ID
+        url = task["url"]
+        mime_type = task.get("mime_type")
+
+        global _QUEUE_COUNT
+        is_queued = TRANSFER_SEMAPHORE.locked()
+        if is_queued:
+            _QUEUE_COUNT += 1
+            pos = _QUEUE_COUNT
+            await callback.message.edit_text(
+                "⏳ <b>Transfer Queued</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+                f"📦 <b>Size:</b> {utils.format_file_size(file_size)}\n"
+                f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
+                f"🔄 <b>Queue Position:</b> #{pos}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>Will start automatically when active transfer completes.</i>",
+                parse_mode=ParseMode.HTML,
+            )
+
+        unique_id = uuid.uuid4().hex[:8]
+        local_dest = config.DOWNLOADS_DIR / f"{unique_id}_{safe_name}"
+
+        async with TRANSFER_SEMAPHORE:
+            if is_queued:
+                _QUEUE_COUNT = max(0, _QUEUE_COUNT - 1)
+                try:
+                    await callback.message.edit_text(
+                        "⚡ <b>Starting Transfer...</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+                        f"📦 <b>Size:</b> {utils.format_file_size(file_size)}\n"
+                        f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
+                        "━━━━━━━━━━━━━━━━━━━━",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+
+            start_time = time.time()
+            dl_tracker = utils.ProgressTracker(
+                action_name="📥 Downloading from URL",
+                filename=safe_name,
+                total_bytes=file_size,
+                target_folder=target_name,
+                update_interval=3.5,
+            )
+
+            loop = asyncio.get_running_loop()
+
+            def dl_progress(current: int, total: int) -> None:
+                if dl_tracker.should_update():
+                    card = dl_tracker.format_status(current)
+
+                    async def _update() -> None:
+                        try:
+                            await callback.message.edit_text(card, parse_mode=ParseMode.HTML)
+                        except MessageNotModified:
+                            pass
+                        except Exception as e:
+                            logger.debug("URL download progress edit error: %s", e)
+
+                    asyncio.run_coroutine_threadsafe(_update(), loop)
+
+            try:
+                # Step 1: Stream download from remote URL
+                logger.info("Starting URL streaming download for '%s' from %s", safe_name, url)
+                dest_path, actual_size, detected_mime = await asyncio.to_thread(
+                    url_service.stream_url_to_file,
+                    url=url,
+                    destination_path=local_dest,
+                    progress_callback=dl_progress,
+                )
+
+                # Step 2: Upload to Google Drive
+                up_tracker = utils.ProgressTracker(
+                    action_name="☁️ Uploading to Google Drive",
+                    filename=safe_name,
+                    total_bytes=actual_size,
+                    target_folder=target_name,
+                    update_interval=3.5,
+                )
+
+                def up_progress(current_bytes: int, total_bytes: int) -> None:
+                    if up_tracker.should_update():
+                        card = up_tracker.format_status(current_bytes)
+
+                        async def _update_up() -> None:
+                            try:
+                                await callback.message.edit_text(card, parse_mode=ParseMode.HTML)
+                            except MessageNotModified:
+                                pass
+                            except Exception as e:
+                                logger.debug("URL upload progress edit error: %s", e)
+
+                        asyncio.run_coroutine_threadsafe(_update_up(), loop)
+
+                uploaded = await asyncio.to_thread(
+                    drive_service.default_drive_service.upload_file,
+                    local_path=dest_path,
+                    filename=safe_name,
+                    mime_type=detected_mime or mime_type,
+                    folder_id=target_id,
+                    progress_callback=up_progress,
+                )
+
+                view_link = uploaded.get("webViewLink") or drive_service.default_drive_service.build_drive_link(uploaded["id"])
+                elapsed = time.time() - start_time
+
+                completion_card = utils.format_completion_card(
+                    filename=uploaded.get("name", safe_name),
+                    file_size=actual_size,
+                    folder_name=target_name,
+                    elapsed_seconds=elapsed,
+                    view_link=view_link,
+                )
+
+                try:
+                    await callback.message.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value)
+                    await callback.message.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+                logger.info("Completed URL transfer for '%s' in %.1fs", safe_name, elapsed)
+
+            except Exception as exc:
+                logger.exception("URL transfer failed for '%s': %s", safe_name, exc)
+                try:
+                    await callback.message.edit_text(
+                        f"❌ <b>Transfer Failed:</b>\n\n<code>{html.escape(str(exc))}</code>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+            finally:
+                if local_dest.exists():
+                    local_dest.unlink(missing_ok=True)
+                    logger.info("Cleaned up temporary URL download file '%s'", local_dest)
+        return
+
     await callback.answer()
 
 
-# ---------------- TEXT PROMPT HANDLER ---------------- #
+# ---------------- TEXT PROMPT & URL HANDLER ---------------- #
+
+async def handle_incoming_url(client: Client, message: Message, url: str) -> None:
+    """Inspect an incoming public URL and present the confirmation card."""
+    wait_msg = await message.reply_text("🔍 <b>Inspecting link...</b>", parse_mode=ParseMode.HTML)
+    try:
+        meta = await asyncio.to_thread(url_service.probe_url, url)
+        if meta["is_html"]:
+            await wait_msg.edit_text(
+                "⚠️ <b>Web Page Detected:</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"🌐 <b>Host:</b> <code>{html.escape(meta['host'])}</code>\n"
+                f"📄 <b>Type:</b> <code>text/html</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>This link points to an HTML webpage or login page, not a direct downloadable file. Please provide a direct download link.</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
+        task_id = uuid.uuid4().hex[:8]
+        url_service.store_pending_task(task_id, {
+            "url": meta["url"],
+            "filename": meta["filename"],
+            "size_bytes": meta["size_bytes"],
+            "mime_type": meta["mime_type"],
+            "host": meta["host"],
+            "provider": meta["provider"],
+            "target_id": target_id,
+            "target_name": target_name,
+            "user_id": message.from_user.id,
+        })
+
+        buttons = [
+            [InlineKeyboardButton("📥 Download & Upload to Drive", callback_data=f"act:url_dl:{task_id}")],
+            [
+                InlineKeyboardButton("📂 Change Target Folder", callback_data="nav:select_mode:root"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"act:url_cancel:{task_id}"),
+            ],
+        ]
+
+        size_text = utils.format_file_size(meta["size_bytes"]) if meta["size_bytes"] > 0 else "Dynamic / Stream"
+        provider_line = f"⚡ <b>Provider:</b> {meta['provider']}\n" if meta["provider"] else ""
+
+        card = (
+            "🔗 <b>Direct File Link Detected</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>File:</b> <code>{html.escape(meta['filename'])}</code>\n"
+            f"📦 <b>Size:</b> {size_text}\n"
+            f"🌐 <b>Host:</b> <code>{html.escape(meta['host'])}</code>\n"
+            f"📁 <b>Target Folder:</b> <code>{html.escape(target_name)}</code>\n"
+            f"{provider_line}"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Press Download to fetch and store directly in Google Drive.</i>"
+        )
+        await wait_msg.edit_text(card, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+
+    except url_service.SSRFSecurityError as sec_err:
+        logger.warning("SSRF blocked for user %s: %s", message.from_user.id, sec_err)
+        await wait_msg.edit_text(f"🛑 <b>Security Error:</b>\n\n<code>{html.escape(str(sec_err))}</code>", parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.exception("Failed to probe URL '%s': %s", url, exc)
+        await wait_msg.edit_text(f"❌ <b>Link Check Failed:</b>\n\n<code>{html.escape(str(exc))}</code>", parse_mode=ParseMode.HTML)
+
+
+@restricted
+async def url_command(client: Client, message: Message) -> None:
+    """Handle /url <link> to download a file from a public URL to Google Drive."""
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.reply_text(
+            "💡 <b>Usage:</b> <code>/url &lt;public_file_link&gt;</code>\n\n"
+            "Or simply paste any direct HTTP/HTTPS link into the chat!",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    url = parts[1].strip()
+    await handle_incoming_url(client, message, url)
+
 
 @restricted
 async def text_handler(client: Client, message: Message) -> None:
-    """Handle conversational text input (e.g. folder creation name, search query)."""
+    """Handle conversational text input (e.g. folder creation name, search query, or pasted URLs)."""
     user_action = state_manager.get_user_action(message.from_user.id)
     if not user_action:
+        # Check if user sent/pasted an HTTP/HTTPS link
+        text = (message.text or "").strip()
+        url_match = re.search(r"https?://[^\s]+", text)
+        if url_match:
+            await handle_incoming_url(client, message, url_match.group(0))
+            return
         return
 
     action = user_action.get("action")

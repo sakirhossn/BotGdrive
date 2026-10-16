@@ -47,10 +47,15 @@ Deployable to **Render Free Tier Web Services** for 24/7 background operation wi
 ## 📋 Available Commands
 
 - `/start` — Open main interactive dashboard menu.
+- `/url <link>` — Download any public file URL directly into Google Drive (SSRF-protected).
 - `/list` or `/browse` — Interactive paginated Google Drive folder and file browser.
+- `/folders` or `/folder` — Visual folder hierarchy tree.
 - `/setfolder` — Choose active destination folder for file uploads.
 - `/mkdir <folder_name>` — Create a new folder in Google Drive.
 - `/search <keyword>` — Search for files across Google Drive.
+- `/delete <keyword>` — Selectively move files or folders to Trash.
+- `/getfile <keyword>` — Post file from Drive directly into chat (in private or groups).
+- `/link <keyword>` — Share Google Drive link into chat.
 - `/status` — Verify bot health, MTProto status, and Drive connection.
 - `/help` — Display command guide and large-file upload instructions.
 - `/cancel` — Cancel any active interactive prompt.
