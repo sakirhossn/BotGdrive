@@ -1130,8 +1130,10 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         await callback.answer("Starting URL transfer...")
         safe_name = utils.sanitize_filename(task["filename"])
         file_size = task.get("size_bytes", 0)
-        target_name = task.get("target_name", "Root")
-        target_id = task.get("target_id") or config.DRIVE_FOLDER_ID
+        # Use user's latest selected destination folder
+        current_target_id, current_target_name = state_manager.get_upload_folder(callback.from_user.id)
+        target_id = current_target_id or task.get("target_id") or config.DRIVE_FOLDER_ID
+        target_name = current_target_name or task.get("target_name", "Root")
         url = task["url"]
         mime_type = task.get("mime_type")
 
@@ -1504,6 +1506,19 @@ async def media_handler(client: Client, message: Message) -> None:
                 )
             except Exception:
                 pass
+
+        # Pre-flight check ephemeral disk space
+        if file_size > 0:
+            is_ok, free_bytes, needed_bytes = utils.check_disk_space(file_size, config.DOWNLOADS_DIR)
+            if not is_ok:
+                await status_msg.edit_text(
+                    f"❌ <b>Transfer Aborted:</b>\n\n"
+                    f"Insufficient server disk space on Render.\n"
+                    f"• Available: <code>{utils.format_file_size(free_bytes)}</code>\n"
+                    f"• Needed: <code>{utils.format_file_size(needed_bytes)}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
 
         dl_tracker = utils.ProgressTracker(
             action_name="📥 Downloading from Telegram",

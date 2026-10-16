@@ -162,32 +162,22 @@ def normalize_provider_url(raw_url: str) -> Tuple[str, Optional[str]]:
 
 def extract_filename_from_headers(headers: http.client.HTTPMessage, fallback_url: str) -> str:
     """Extract filename from Content-Disposition header, with fallback to URL path or timestamp."""
-    disposition = headers.get("Content-Disposition", "")
-    if disposition:
-        # Try RFC 5987 / 6266 filename*
-        m_star = re.search(r"filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)", disposition)
-        if m_star:
-            return urllib.parse.unquote(m_star.group(1).strip('"\' '))
-
-        # Try standard filename="foo.ext"
-        m = re.search(r'filename\s*=\s*"([^"]+)"', disposition) or re.search(r"filename\s*=\s*([^; ]+)", disposition)
+    disp = headers.get("Content-Disposition", "")
+    if disp:
+        m = re.search(r"filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)", disp) or re.search(r'filename\s*=\s*"?([^";]+)"?', disp)
         if m:
-            clean = m.group(1).strip('"\' ')
+            clean = urllib.parse.unquote(m.group(1).strip('"\' '))
             if clean:
-                return urllib.parse.unquote(clean)
+                return clean
 
-    # Fallback to URL path
     parsed = urllib.parse.urlsplit(fallback_url)
     path_name = Path(urllib.parse.unquote(parsed.path)).name
     if path_name and "." in path_name:
         return path_name
 
-    # Fallback using MIME type extension
     content_type = (headers.get("Content-Type", "")).split(";")[0].strip().lower()
     ext = mimetypes.guess_extension(content_type) or ".bin"
-    if ext == ".jpe":
-        ext = ".jpg"
-    return f"file_{int(time.time())}{ext}"
+    return f"file_{int(time.time())}{'.jpg' if ext == '.jpe' else ext}"
 
 
 def probe_url(url: str, timeout: float = 12.0) -> Dict[str, Any]:
@@ -333,8 +323,13 @@ def stream_url_to_file(
         total_size = int(content_length_str) if content_length_str and content_length_str.isdigit() else 0
         mime_type = (resp.headers.get("Content-Type", "")).split(";")[0].strip().lower() or "application/octet-stream"
 
-        if total_size > max_bytes:
-            raise ValueError(f"File size ({utils.format_file_size(total_size)}) exceeds the maximum allowed limit of {utils.format_file_size(max_bytes)}.")
+        if total_size > 0:
+            is_ok, free_bytes, needed_bytes = utils.check_disk_space(total_size, dest.parent)
+            if not is_ok:
+                raise OSError(
+                    f"Insufficient server storage space (available: {utils.format_file_size(free_bytes)}, "
+                    f"needed: {utils.format_file_size(needed_bytes)}). Aborted."
+                )
 
         with open(dest, "wb") as fh:
             while True:

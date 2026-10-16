@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import config
 import url_service
+import utils
 
 
 class TestUrlDownloader(unittest.TestCase):
@@ -89,6 +91,26 @@ class TestUrlDownloader(unittest.TestCase):
         popped = url_service.pop_pending_task(task_id)
         self.assertEqual(popped["filename"], "test.zip")
         self.assertIsNone(url_service.get_pending_task(task_id))
+
+    def test_disk_space_guard(self) -> None:
+        """Verify disk space check flags impossibly large requests."""
+        # Realistic size should pass
+        is_ok, free, needed = utils.check_disk_space(1024, config.DOWNLOADS_DIR)
+        self.assertTrue(is_ok)
+        self.assertGreater(free, 0)
+
+        # 1 Petabyte request must fail
+        is_ok_huge, free_huge, needed_huge = utils.check_disk_space(10**15, config.DOWNLOADS_DIR)
+        self.assertFalse(is_ok_huge)
+
+    def test_format_helpers(self) -> None:
+        """Verify shrunken formatters match expectations."""
+        self.assertEqual(utils.format_file_size(0), "0 B")
+        self.assertEqual(utils.format_file_size(1024), "1.0 KB")
+        self.assertEqual(utils.format_file_size(1048576), "1.0 MB")
+        self.assertEqual(utils.format_time(45), "45s")
+        self.assertEqual(utils.format_time(90), "1m 30s")
+        self.assertEqual(utils.format_time(3665), "1h 1m")
 
 
 if __name__ == "__main__":

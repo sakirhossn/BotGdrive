@@ -3,39 +3,50 @@
 from __future__ import annotations
 
 import html
-import math
 import re
+import shutil
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 
 
 def format_file_size(size_bytes: Optional[int]) -> str:
     """Convert raw byte integer into human-readable string (KB, MB, GB)."""
     if size_bytes is None or size_bytes < 0:
         return "Unknown size"
-    if size_bytes == 0:
-        return "0 B"
-
-    units = ["B", "KB", "MB", "GB", "TB"]
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    i = min(i, len(units) - 1)
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 1) if i > 0 else int(size_bytes)
-    return f"{s} {units[i]}"
+    val = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if val < 1024.0 or unit == "TB":
+            return f"{int(val)} B" if unit == "B" else f"{val:.1f} {unit}"
+        val /= 1024.0
+    return f"{val:.1f} TB"
 
 
 def format_time(seconds: float) -> str:
     """Format duration in seconds into human-readable duration."""
-    seconds = int(seconds)
-    if seconds <= 0:
-        return "0s"
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes, sec = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}m {sec}s"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h {minutes}m"
+    s = int(seconds)
+    if s < 60:
+        return f"{max(0, s)}s"
+    m, s = divmod(s, 60)
+    return f"{m}m {s}s" if m < 60 else f"{m // 60}h {m % 60}m"
+
+
+def check_disk_space(
+    required_bytes: int,
+    target_dir: Path | str,
+    buffer_bytes: int = 100 * 1024 * 1024,
+) -> Tuple[bool, int, int]:
+    """Check if target directory has sufficient free disk space for download + safety buffer.
+    
+    Returns:
+        (is_sufficient, free_bytes, needed_bytes)
+    """
+    try:
+        usage = shutil.disk_usage(str(target_dir))
+        needed = required_bytes + buffer_bytes
+        return usage.free >= needed, usage.free, needed
+    except Exception:
+        return True, 0, 0
 
 
 def truncate_button_text(text: str, max_len: int = 30) -> str:
