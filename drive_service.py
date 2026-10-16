@@ -76,7 +76,16 @@ class DriveService:
                     )
                 logger.info("Initiating Google OAuth flow...")
                 flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_file), SCOPES)
-                creds = flow.run_local_server(port=0)
+                try:
+                    creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
+                except Exception as oauth_err:
+                    err_msg = str(oauth_err)
+                    if "browser" in err_msg.lower() or os.getenv("RENDER"):
+                        raise RuntimeError(
+                            "Google OAuth token is expired or revoked ('invalid_grant'), and this server cannot open a browser (headless cloud environment).\n"
+                            "👉 FIX: Re-authenticate locally on your PC by running 'python generate_token.py', then paste the new token into Render's 'TOKEN_JSON_CONTENT' environment variable."
+                        ) from oauth_err
+                    raise
 
             try:
                 with open(self.token_file, "w", encoding="utf-8") as token_out:
