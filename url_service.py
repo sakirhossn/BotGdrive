@@ -286,10 +286,12 @@ def stream_url_to_file(
     url: str,
     destination_path: Path | str,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
     max_bytes: int = MAX_DOWNLOAD_BYTES,
     timeout: float = 30.0,
+    max_retries: int = 5,
 ) -> Tuple[Path, int, str]:
-    """Stream a remote URL directly to a local file with live progress tracking and 2 GB limit enforcement.
+    """Stream a remote URL directly to a local file with live progress, auto-resume via HTTP Range, and 2 GB limit.
 
     Returns:
         (dest_path, actual_bytes_downloaded, mime_type)
@@ -300,54 +302,96 @@ def stream_url_to_file(
     dest = Path(destination_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    req = urllib.request.Request(
-        target_url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "*/*",
-        },
-    )
-
     opener = build_safe_opener()
     chunk_size = 256 * 1024  # 256 KB streaming chunks
     downloaded_bytes = 0
+    total_size = 0
+    mime_type = "application/octet-stream"
 
-    with opener.open(req, timeout=timeout) as resp:
-        # Validate final URL after redirects
-        validate_url_security(resp.geturl())
+    retry_count = 0
+    while True:
+        try:
+            req_headers: Dict[str, str] = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "*/*",
+            }
 
-        content_length_str = resp.headers.get("Content-Length")
-        total_size = int(content_length_str) if content_length_str and content_length_str.isdigit() else 0
-        mime_type = (resp.headers.get("Content-Type", "")).split(";")[0].strip().lower() or "application/octet-stream"
+            if downloaded_bytes > 0:
+                req_headers["Range"] = f"bytes={downloaded_bytes}-"
+                file_mode = "ab"
+                if status_callback:
+                    status_callback(f"🔄 Reconnecting and resuming from {utils.format_file_size(downloaded_bytes)}...")
+                logger.info("Resuming stream for '%s' from byte %d", dest.name, downloaded_bytes)
+            else:
+                file_mode = "wb"
 
-        if total_size > 0:
-            is_ok, free_bytes, needed_bytes = utils.check_disk_space(total_size, dest.parent)
-            if not is_ok:
-                raise OSError(
-                    f"Insufficient server storage space (available: {utils.format_file_size(free_bytes)}, "
-                    f"needed: {utils.format_file_size(needed_bytes)}). Aborted."
-                )
+            req = urllib.request.Request(target_url, headers=req_headers)
 
-        with open(dest, "wb") as fh:
-            while True:
-                chunk = resp.read(chunk_size)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                downloaded_bytes += len(chunk)
+            with opener.open(req, timeout=timeout) as resp:
+                validate_url_security(resp.geturl())
 
-                if downloaded_bytes > max_bytes:
-                    dest.unlink(missing_ok=True)
-                    raise ValueError(f"Download exceeded maximum allowed limit ({utils.format_file_size(max_bytes)}). Aborted.")
+                # On initial connection, inspect headers and disk space
+                if downloaded_bytes == 0:
+                    content_length_str = resp.headers.get("Content-Length")
+                    total_size = int(content_length_str) if content_length_str and content_length_str.isdigit() else 0
+                    content_type_raw = resp.headers.get("Content-Type", "")
+                    mime_type = content_type_raw.split(";")[0].strip().lower() or "application/octet-stream"
 
-                if progress_callback:
-                    progress_callback(downloaded_bytes, total_size)
+                    if total_size > max_bytes:
+                        raise ValueError(f"File size ({utils.format_file_size(total_size)}) exceeds limit of {utils.format_file_size(max_bytes)}.")
 
-        if progress_callback and total_size > 0:
-            progress_callback(total_size, total_size)
+                    if total_size > 0:
+                        is_ok, free_bytes, needed_bytes = utils.check_disk_space(total_size, dest.parent)
+                        if not is_ok:
+                            raise OSError(
+                                f"Insufficient server storage space (available: {utils.format_file_size(free_bytes)}, "
+                                f"needed: {utils.format_file_size(needed_bytes)}). Aborted."
+                            )
+
+                with open(dest, file_mode) as fh:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        downloaded_bytes += len(chunk)
+
+                        if downloaded_bytes > max_bytes:
+                            dest.unlink(missing_ok=True)
+                            raise ValueError(f"Download exceeded maximum allowed limit ({utils.format_file_size(max_bytes)}). Aborted.")
+
+                        if progress_callback:
+                            progress_callback(downloaded_bytes, total_size)
+
+            # Check if download finished completely
+            if total_size > 0 and downloaded_bytes < total_size:
+                raise http.client.IncompleteRead(bytes(), expected=total_size - downloaded_bytes)
+
+            # Clean completion
+            break
+
+        except (http.client.IncompleteRead, urllib.error.URLError, socket.timeout, ConnectionResetError, OSError) as exc:
+            retry_count += 1
+            if retry_count > max_retries:
+                logger.error("Download failed after %d retries for %s: %s", max_retries, target_url, exc)
+                raise IOError(f"Connection dropped and failed after {max_retries} resume attempts: {exc}") from exc
+
+            logger.warning(
+                "Stream interrupted at %s / %s (%s). Resuming (%d/%d) in %ds...",
+                utils.format_file_size(downloaded_bytes),
+                utils.format_file_size(total_size),
+                exc,
+                retry_count,
+                max_retries,
+                retry_count * 2,
+            )
+            time.sleep(retry_count * 2)
+
+    if progress_callback and total_size > 0:
+        progress_callback(total_size, total_size)
 
     return dest, downloaded_bytes, mime_type
 

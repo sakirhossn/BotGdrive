@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus, ChatType, ParseMode
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # Sequential transfer semaphore to prevent concurrent transfers from exhausting 512 MB RAM / 1.5 GB ephemeral disk on Render Free Tier
 TRANSFER_SEMAPHORE = asyncio.Semaphore(1)
 _QUEUE_COUNT = 0
+_ACTIVE_TRANSFER: Dict[str, Any] = {}
 
 
 async def is_authorized_user(client: Client, message: Message) -> bool:
@@ -1226,6 +1227,13 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         if is_queued:
             _QUEUE_COUNT += 1
             pos = _QUEUE_COUNT
+            active_info = ""
+            if _ACTIVE_TRANSFER.get("filename"):
+                active_info = (
+                    f"⚡ <b>Active Transfer:</b> <code>{html.escape(_ACTIVE_TRANSFER.get('filename', ''))}</code>\n"
+                    f"📊 <b>Active Progress:</b> {_ACTIVE_TRANSFER.get('status', 'in progress')}\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                )
             await callback.message.edit_text(
                 "⏳ <b>Transfer Queued</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1234,6 +1242,7 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 f"📁 <b>Target:</b> <code>{html.escape(target_name)}</code>\n"
                 f"🔄 <b>Queue Position:</b> #{pos}\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
+                f"{active_info}"
                 "💡 <i>Will start automatically when active transfer completes.</i>",
                 parse_mode=ParseMode.HTML,
             )
@@ -1258,6 +1267,9 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                     pass
 
             start_time = time.time()
+            _ACTIVE_TRANSFER["filename"] = safe_name
+            _ACTIVE_TRANSFER["status"] = "Starting..."
+
             dl_tracker = utils.ProgressTracker(
                 action_name="📥 Downloading from URL",
                 filename=safe_name,
@@ -1269,12 +1281,20 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             loop = asyncio.get_running_loop()
 
             def dl_progress(current: int, total: int) -> None:
+                pct = (current / total * 100) if total > 0 else 0
+                _ACTIVE_TRANSFER["status"] = f"{pct:.1f}% ({utils.format_file_size(current)}/{utils.format_file_size(total)})"
                 if dl_tracker.should_update():
                     card = dl_tracker.format_status(current)
 
                     async def _update() -> None:
                         try:
                             await callback.message.edit_text(card, parse_mode=ParseMode.HTML)
+                        except FloodWait as fw:
+                            await asyncio.sleep(fw.value)
+                            try:
+                                await callback.message.edit_text(card, parse_mode=ParseMode.HTML)
+                            except Exception:
+                                pass
                         except MessageNotModified:
                             pass
                         except Exception as e:
@@ -1282,14 +1302,30 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
 
                     asyncio.run_coroutine_threadsafe(_update(), loop)
 
+            def on_status_change(status_text: str) -> None:
+                async def _send_status() -> None:
+                    try:
+                        await callback.message.edit_text(
+                            "⚡ <b>Transfer in Progress</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+                            f"{status_text}\n"
+                            "━━━━━━━━━━━━━━━━━━━━",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass
+                asyncio.run_coroutine_threadsafe(_send_status(), loop)
+
             try:
-                # Step 1: Stream download from remote URL
+                # Step 1: Stream download from remote URL with auto-resuming Range support
                 logger.info("Starting URL streaming download for '%s' from %s", safe_name, url)
                 dest_path, actual_size, detected_mime = await asyncio.to_thread(
                     url_service.stream_url_to_file,
                     url=url,
                     destination_path=local_dest,
                     progress_callback=dl_progress,
+                    status_callback=on_status_change,
                 )
 
                 # Step 2: Upload to Google Drive
@@ -1302,12 +1338,20 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 )
 
                 def up_progress(current_bytes: int, total_bytes: int) -> None:
+                    pct = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+                    _ACTIVE_TRANSFER["status"] = f"Drive upload {pct:.1f}%"
                     if up_tracker.should_update():
                         card = up_tracker.format_status(current_bytes)
 
                         async def _update_up() -> None:
                             try:
                                 await callback.message.edit_text(card, parse_mode=ParseMode.HTML)
+                            except FloodWait as fw:
+                                await asyncio.sleep(fw.value)
+                                try:
+                                    await callback.message.edit_text(card, parse_mode=ParseMode.HTML)
+                                except Exception:
+                                    pass
                             except MessageNotModified:
                                 pass
                             except Exception as e:
@@ -1352,6 +1396,7 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 except Exception:
                     pass
             finally:
+                _ACTIVE_TRANSFER.clear()
                 if local_dest.exists():
                     local_dest.unlink(missing_ok=True)
                     logger.info("Cleaned up temporary URL download file '%s'", local_dest)

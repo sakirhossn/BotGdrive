@@ -112,6 +112,52 @@ class TestUrlDownloader(unittest.TestCase):
         self.assertEqual(utils.format_time(90), "1m 30s")
         self.assertEqual(utils.format_time(3665), "1h 1m")
 
+    def test_stream_url_to_file_resume(self) -> None:
+        """Verify stream_url_to_file sends Range header and resumes when connection drops."""
+        import tempfile
+        from unittest.mock import patch
+
+        total_bytes = 1000
+        part1 = b"A" * 400
+        part2 = b"B" * 600
+
+        # Mock first response: sends 400 bytes then EOF while total_size is 1000
+        resp1 = MagicMock()
+        resp1.geturl.return_value = "https://example.com/data.bin"
+        resp1.headers = {"Content-Length": str(total_bytes), "Content-Type": "application/octet-stream"}
+        resp1.read.side_effect = [part1, b""]  # Premature EOF triggers IncompleteRead
+
+        # Mock second response: sends remaining 600 bytes
+        resp2 = MagicMock()
+        resp2.geturl.return_value = "https://example.com/data.bin"
+        resp2.headers = {"Content-Length": str(len(part2)), "Content-Type": "application/octet-stream"}
+        resp2.read.side_effect = [part2, b""]
+
+        mock_opener = MagicMock()
+        # Return resp1 as context manager, then resp2
+        mock_opener.open.side_effect = [resp1, resp2]
+        resp1.__enter__.return_value = resp1
+        resp2.__enter__.return_value = resp2
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest_file = Path(tmpdir) / "output.bin"
+            with patch("url_service.build_safe_opener", return_value=mock_opener), \
+                 patch("url_service.validate_url_security", return_value="https://example.com/data.bin"), \
+                 patch("time.sleep", return_value=None):
+                
+                dest, downloaded, mime = url_service.stream_url_to_file(
+                    "https://example.com/data.bin",
+                    dest_file,
+                    timeout=5.0,
+                    max_retries=2,
+                )
+
+                self.assertEqual(downloaded, total_bytes)
+                self.assertEqual(dest.read_bytes(), part1 + part2)
+                # Verify second request included Range header
+                second_call_req = mock_opener.open.call_args_list[1][0][0]
+                self.assertEqual(second_call_req.headers.get("Range"), "bytes=400-")
+
 
 if __name__ == "__main__":
     unittest.main()
