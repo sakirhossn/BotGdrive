@@ -303,7 +303,7 @@ def stream_url_to_file(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     opener = build_safe_opener()
-    chunk_size = 256 * 1024  # 256 KB streaming chunks
+    chunk_size = 1024 * 1024  # 1 MB streaming chunks for high throughput
     downloaded_bytes = 0
     total_size = 0
     mime_type = "application/octet-stream"
@@ -317,6 +317,8 @@ def stream_url_to_file(
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 ),
                 "Accept": "*/*",
+                "Connection": "keep-alive",
+                "Accept-Encoding": "identity",
             }
 
             if downloaded_bytes > 0:

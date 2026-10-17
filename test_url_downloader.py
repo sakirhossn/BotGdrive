@@ -158,6 +158,19 @@ class TestUrlDownloader(unittest.TestCase):
                 second_call_req = mock_opener.open.call_args_list[1][0][0]
                 self.assertEqual(second_call_req.headers.get("Range"), "bytes=400-")
 
+    def test_progress_tracker_windowed_speed(self) -> None:
+        """Verify ProgressTracker calculates responsive speed and formats card."""
+        tracker = utils.ProgressTracker(
+            action_name="📥 Downloading",
+            filename="test_video.mp4",
+            total_bytes=100 * 1024 * 1024,
+            update_interval=0.1,
+        )
+        card1 = tracker.format_status(10 * 1024 * 1024)
+        self.assertIn("test_video.mp4", card1)
+        self.assertIn("10.0%", card1)
+        self.assertIn("Speed:", card1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,20 +84,32 @@ class ProgressTracker:
         self.update_interval = update_interval
         self.start_time = time.time()
         self.last_update_time = self.start_time
+        self.last_bytes = 0
+        self.smoothed_speed = 0.0
 
     def should_update(self) -> bool:
         """Throttle updates to avoid Telegram flood limits."""
         now = time.time()
         if now - self.last_update_time >= self.update_interval:
-            self.last_update_time = now
             return True
         return False
 
     def format_status(self, current_bytes: int) -> str:
         """Build modern formatted progress card."""
         now = time.time()
-        elapsed = max(now - self.start_time, 0.001)
-        speed = current_bytes / elapsed
+        window_time = max(now - self.last_update_time, 0.001)
+        window_bytes = max(current_bytes - self.last_bytes, 0)
+        self.last_update_time = now
+        self.last_bytes = current_bytes
+
+        if window_time > 0 and window_bytes > 0:
+            inst_speed = window_bytes / window_time
+            if self.smoothed_speed == 0.0:
+                self.smoothed_speed = inst_speed
+            else:
+                self.smoothed_speed = 0.7 * inst_speed + 0.3 * self.smoothed_speed
+
+        speed = self.smoothed_speed if self.smoothed_speed > 0 else (current_bytes / max(now - self.start_time, 0.001))
         speed_str = f"{format_file_size(int(speed))}/s"
 
         if self.total_bytes > 0:

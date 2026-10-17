@@ -1384,17 +1384,56 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 except FloodWait as fw:
                     await asyncio.sleep(fw.value)
                     await callback.message.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+
+                # Send explicit chat notification text message
+                try:
+                    await client.send_message(
+                        chat_id=callback.message.chat.id,
+                        text=(
+                            "🎉 <b>Transfer Complete Notification</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📄 <b>File:</b> <code>{html.escape(uploaded.get('name', safe_name))}</code>\n"
+                            f"📦 <b>Size:</b> {utils.format_file_size(actual_size)}\n"
+                            f"📁 <b>Target Folder:</b> <code>{html.escape(target_name)}</code>\n"
+                            f"⏱️ <b>Time:</b> {utils.format_time(elapsed)}\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🔗 <a href='{view_link}'>Open in Google Drive</a>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=False,
+                    )
+                except Exception as notif_err:
+                    logger.debug("Could not send completion chat notification: %s", notif_err)
+
                 logger.info("Completed URL transfer for '%s' in %.1fs", safe_name, elapsed)
 
             except Exception as exc:
                 logger.exception("URL transfer failed for '%s': %s", safe_name, exc)
+                err_text = html.escape(str(exc))
                 try:
                     await callback.message.edit_text(
-                        f"❌ <b>Transfer Failed:</b>\n\n<code>{html.escape(str(exc))}</code>",
+                        f"❌ <b>Transfer Failed:</b>\n\n<code>{err_text}</code>",
                         parse_mode=ParseMode.HTML,
                     )
                 except Exception:
                     pass
+
+                # Send explicit chat error notification text message
+                try:
+                    await client.send_message(
+                        chat_id=callback.message.chat.id,
+                        text=(
+                            "🚨 <b>Transfer Error Alert</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+                            f"⚠️ <b>Error:</b> <code>{err_text}</code>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            "💡 <i>Please verify the link validity or server availability.</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception as notif_err:
+                    logger.debug("Could not send error chat notification: %s", notif_err)
             finally:
                 _ACTIVE_TRANSFER.clear()
                 if local_dest.exists():
@@ -1759,17 +1798,56 @@ async def media_handler(client: Client, message: Message) -> None:
             except FloodWait as fw:
                 await asyncio.sleep(fw.value)
                 await status_msg.edit_text(completion_card, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+
+            # Send explicit chat notification text message
+            try:
+                await client.send_message(
+                    chat_id=message.chat.id,
+                    text=(
+                        "🎉 <b>Transfer Complete Notification</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📄 <b>File:</b> <code>{html.escape(uploaded.get('name', safe_name))}</code>\n"
+                        f"📦 <b>Size:</b> {utils.format_file_size(actual_size)}\n"
+                        f"📁 <b>Target Folder:</b> <code>{html.escape(target_name)}</code>\n"
+                        f"⏱️ <b>Time:</b> {utils.format_time(elapsed)}\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🔗 <a href='{view_link}'>Open in Google Drive</a>"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False,
+                )
+            except Exception as notif_err:
+                logger.debug("Could not send media completion notification: %s", notif_err)
+
             logger.info("Completed full transfer for '%s' in %.1fs", safe_name, elapsed)
 
         except Exception as exc:
             logger.exception("Media transfer failed for '%s': %s", safe_name, exc)
+            err_text = html.escape(str(exc))
             try:
                 await status_msg.edit_text(
-                    f"❌ <b>Transfer Failed:</b>\n\n<code>{html.escape(str(exc))}</code>",
+                    f"❌ <b>Transfer Failed:</b>\n\n<code>{err_text}</code>",
                     parse_mode=ParseMode.HTML,
                 )
             except Exception:
                 pass
+
+            # Send explicit chat error notification text message
+            try:
+                await client.send_message(
+                    chat_id=message.chat.id,
+                    text=(
+                        "🚨 <b>Transfer Error Alert</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📄 <b>File:</b> <code>{html.escape(safe_name)}</code>\n"
+                        f"⚠️ <b>Error:</b> <code>{err_text}</code>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        "💡 <i>Please retry or check bot server logs.</i>"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as notif_err:
+                logger.debug("Could not send media error notification: %s", notif_err)
         finally:
             if local_dest.exists():
                 local_dest.unlink(missing_ok=True)
