@@ -47,7 +47,7 @@ Deployable to **Render Free Tier Web Services** for 24/7 background operation wi
 ## 📋 Available Commands
 
 - `/start` — Open main interactive dashboard menu.
-- `/url <link>` — Download any public file URL directly into Google Drive (SSRF-protected).
+- `/url <link>` — Universal Link Downloader: direct HTTP links, Cloud shares (Dropbox, Google Drive, GitHub), and public media (YouTube, Instagram Reels, Facebook Reels, TikTok, Vimeo, SoundCloud) up to 2 GB directly into Google Drive.
 - `/list` or `/browse` — Interactive paginated Google Drive folder and file browser.
 - `/folders` or `/folder` — Visual folder hierarchy tree.
 - `/setfolder` — Choose active destination folder for file uploads.

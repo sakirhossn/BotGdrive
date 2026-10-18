@@ -141,8 +141,8 @@ class TestUrlDownloader(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dest_file = Path(tmpdir) / "output.bin"
-            with patch("url_service.build_safe_opener", return_value=mock_opener), \
-                 patch("url_service.validate_url_security", return_value="https://example.com/data.bin"), \
+            with patch("providers.direct_http.build_safe_opener", return_value=mock_opener), \
+                 patch("providers.direct_http.validate_url_security", return_value="https://example.com/data.bin"), \
                  patch("time.sleep", return_value=None):
                 
                 dest, downloaded, mime = url_service.stream_url_to_file(

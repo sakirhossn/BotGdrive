@@ -67,6 +67,12 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 # Render Web Service HTTP Port
 PORT: int = int(os.getenv("PORT", "10000"))
 
+# URL Downloader Settings (2 GB support & concurrency limits)
+MAX_URL_DOWNLOAD_MB: int = int(os.getenv("MAX_URL_DOWNLOAD_MB", "2048"))
+MAX_URL_DOWNLOAD_BYTES: int = MAX_URL_DOWNLOAD_MB * 1024 * 1024
+URL_DOWNLOAD_TIMEOUT_SECONDS: int = int(os.getenv("URL_DOWNLOAD_TIMEOUT_SECONDS", "1800"))
+MAX_CONCURRENT_URL_DOWNLOADS: int = int(os.getenv("MAX_CONCURRENT_URL_DOWNLOADS", "1"))
+
 
 def parse_allowed_user_ids(raw_ids: str) -> Set[int]:
     """Parse comma-separated Telegram user IDs."""
@@ -109,4 +115,11 @@ def validate_config() -> list[str]:
         errors.append("DRIVE_FOLDER_ID is missing or empty in .env")
     if not ALLOWED_USER_IDS:
         errors.append("ALLOWED_USER_IDS is missing or empty in .env")
+    if MAX_URL_DOWNLOAD_MB <= 0:
+        errors.append("MAX_URL_DOWNLOAD_MB must be greater than 0")
+    if URL_DOWNLOAD_TIMEOUT_SECONDS <= 0:
+        errors.append("URL_DOWNLOAD_TIMEOUT_SECONDS must be greater than 0")
+    if MAX_CONCURRENT_URL_DOWNLOADS <= 0:
+        errors.append("MAX_CONCURRENT_URL_DOWNLOADS must be greater than 0")
     return errors
+

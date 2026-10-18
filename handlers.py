@@ -27,7 +27,7 @@ import utils
 logger = logging.getLogger(__name__)
 
 # Sequential transfer semaphore to prevent concurrent transfers from exhausting 512 MB RAM / 1.5 GB ephemeral disk on Render Free Tier
-TRANSFER_SEMAPHORE = asyncio.Semaphore(1)
+TRANSFER_SEMAPHORE = asyncio.Semaphore(config.MAX_CONCURRENT_URL_DOWNLOADS)
 _QUEUE_COUNT = 0
 _ACTIVE_TRANSFER: Dict[str, Any] = {}
 
@@ -1204,6 +1204,29 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         await callback.answer("Canceled.")
         return
 
+    # URL Downloader Check Link
+    if data.startswith("act:url_check:"):
+        task_id = data.split(":", 2)[2]
+        task = url_service.get_pending_task(task_id)
+        if not task:
+            await callback.answer("❌ This link request has expired. Please re-send the link.", show_alert=True)
+            return
+        await callback.answer("🔎 Checking link availability...")
+        try:
+            meta = await asyncio.to_thread(url_service.probe_url, task["url"])
+            task.update({
+                "filename": meta["filename"],
+                "size_bytes": meta["size_bytes"],
+                "mime_type": meta["mime_type"],
+                "provider": meta.get("provider_name") or meta.get("provider"),
+            })
+            url_service.store_pending_task(task_id, task)
+            size_disp = utils.format_file_size(meta["size_bytes"]) if meta["size_bytes"] > 0 else "Dynamic Stream"
+            await callback.answer(f"✅ Verified: {meta['filename']}\nSize: {size_disp}", show_alert=True)
+        except Exception as exc:
+            await callback.answer(f"⚠️ Error checking link: {exc}", show_alert=True)
+        return
+
     # URL Downloader Execute
     if data.startswith("act:url_dl:"):
         task_id = data.split(":", 2)[2]
@@ -1480,22 +1503,24 @@ async def handle_incoming_url(client: Client, message: Message, url: str) -> Non
         buttons = [
             [InlineKeyboardButton("📥 Download & Upload to Drive", callback_data=f"act:url_dl:{task_id}")],
             [
-                InlineKeyboardButton("📂 Change Target Folder", callback_data="nav:select_mode:root"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"act:url_cancel:{task_id}"),
+                InlineKeyboardButton("📂 Choose Drive Folder", callback_data="nav:select_mode:root"),
+                InlineKeyboardButton("🔎 Check Link", callback_data=f"act:url_check:{task_id}"),
             ],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"act:url_cancel:{task_id}")],
         ]
 
         size_text = utils.format_file_size(meta["size_bytes"]) if meta["size_bytes"] > 0 else "Dynamic / Stream"
-        provider_line = f"⚡ <b>Provider:</b> {meta['provider']}\n" if meta["provider"] else ""
+        provider_disp = meta.get("provider_name") or meta.get("provider") or "Direct HTTP"
 
         card = (
-            "🔗 <b>Direct File Link Detected</b>\n"
+            "🔗 <b>Link received</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📄 <b>File:</b> <code>{html.escape(meta['filename'])}</code>\n"
+            f"📄 <b>Title/File:</b> <code>{html.escape(meta['filename'])}</code>\n"
             f"📦 <b>Size:</b> {size_text}\n"
-            f"🌐 <b>Host:</b> <code>{html.escape(meta['host'])}</code>\n"
+            f"🌐 <b>Source:</b> <code>{html.escape(meta['host'])}</code>\n"
             f"📁 <b>Target Folder:</b> <code>{html.escape(target_name)}</code>\n"
-            f"{provider_line}"
+            f"⚡ <b>Provider:</b> {html.escape(provider_disp)}\n"
+            f"📊 <b>Status:</b> Ready for Download\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "💡 <i>Press Download to fetch and store directly in Google Drive.</i>"
         )
