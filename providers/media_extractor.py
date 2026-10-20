@@ -71,19 +71,22 @@ class MediaExtractorProvider(BaseProvider):
     @staticmethod
     def _find_cli_binary() -> Optional[str]:
         """Locate standalone or system yt-dlp binary if available."""
-        import sys
+        # 1. Prioritize standalone binary at /usr/local/bin/yt-dlp (bundled with modern Python)
+        for p in ("/usr/local/bin/yt-dlp", "/opt/yt-dlp/yt-dlp"):
+            candidate = Path(p)
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+
+        # 2. Check system PATH
         cli = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
         if cli:
             return cli
 
+        # 3. Check virtualenv bin
+        import sys
         venv_bin = Path(sys.executable).parent
         for candidate in (venv_bin / "yt-dlp", venv_bin / "yt-dlp.exe"):
             if candidate.is_file():
-                return str(candidate)
-
-        for p in ("/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp", "/opt/yt-dlp/yt-dlp"):
-            candidate = Path(p)
-            if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
 
         return None
@@ -99,6 +102,8 @@ class MediaExtractorProvider(BaseProvider):
             "--no-warnings",
             "--skip-download",
             "--socket-timeout", str(int(timeout)),
+            "--user-agent", self.COMMON_HEADERS["User-Agent"],
+            "--extractor-args", "youtube:player_client=android,ios,web",
             url,
         ]
         cookie_path = self._get_cookie_path()
@@ -108,7 +113,8 @@ class MediaExtractorProvider(BaseProvider):
         try:
             import subprocess
             import json
-            res = subprocess.check_output(cmd, text=True, timeout=timeout + 5)
+            logger.info("Probing via standalone CLI (%s): %s", cli_bin, url)
+            res = subprocess.check_output(cmd, text=True, timeout=timeout + 10)
             info = json.loads(res)
             parsed = urllib.parse.urlsplit(url)
             host = parsed.hostname or "media-host"
@@ -163,6 +169,8 @@ class MediaExtractorProvider(BaseProvider):
             "--no-warnings",
             "--socket-timeout", str(int(timeout)),
             "--format", "best[ext=mp4]/best",
+            "--user-agent", self.COMMON_HEADERS["User-Agent"],
+            "--extractor-args", "youtube:player_client=android,ios,web",
             url,
         ]
         cookie_path = self._get_cookie_path()
