@@ -136,30 +136,30 @@ async def set_menu_commands(app: Client) -> None:
     """Register command menu autocomplete with Telegram for both Default and AllPrivateChats scopes."""
     try:
         commands = [
-            BotCommand("start", "Open main dashboard menu"),
-            BotCommand("url", "Download file/media from any public link to Drive"),
-            BotCommand("download", "Download from link (/download <url>)"),
-            BotCommand("list", "Browse Google Drive files and folders"),
-            BotCommand("folders", "View folder hierarchy and structure"),
-            BotCommand("setfolder", "Select upload destination folder"),
-            BotCommand("mkdir", "Create a new folder in Drive"),
-            BotCommand("search", "Search for files in Drive"),
-            BotCommand("delete", "Delete file or folder safely to Trash"),
-            BotCommand("getfile", "Deliver a Drive file into the chat (up to 2GB)"),
-            BotCommand("link", "Share Google Drive link into chat"),
-            BotCommand("links", "Search and share Drive file links"),
-            BotCommand("status", "Check bot and Drive connection status"),
-            BotCommand("reloadcommands", "Refresh Telegram bot command list"),
-            BotCommand("help", "Show commands and guide"),
-            BotCommand("cancel", "Cancel current operation"),
+            BotCommand("start", "🏠 Open main dashboard menu"),
+            BotCommand("url", "🔗 Download file/media from public link"),
+            BotCommand("download", "📥 Download from link (/download <url>)"),
+            BotCommand("list", "📂 Browse Google Drive files & folders"),
+            BotCommand("folders", "🗂️ View folder hierarchy & structure"),
+            BotCommand("setfolder", "🎯 Select upload destination folder"),
+            BotCommand("mkdir", "➕ Create a new folder in Drive"),
+            BotCommand("search", "🔍 Search for files in Drive"),
+            BotCommand("delete", "🗑️ Delete file or folder safely to Trash"),
+            BotCommand("getfile", "📤 Deliver Drive file into chat (up to 2GB)"),
+            BotCommand("link", "🌐 Share Google Drive link into chat"),
+            BotCommand("links", "📑 Search & share Drive file links"),
+            BotCommand("status", "📊 Check bot & Drive connection status"),
+            BotCommand("reloadcommands", "🔄 Refresh Telegram bot command list"),
+            BotCommand("help", "📖 Show commands and user guide"),
+            BotCommand("cancel", "❌ Cancel current operation"),
         ]
 
         group_commands = [
-            BotCommand("getfile", "Deliver a Drive file into the chat (up to 2GB)"),
-            BotCommand("link", "Share Google Drive link into chat"),
-            BotCommand("links", "Search and share Drive file links"),
-            BotCommand("folders", "View folder hierarchy and structure"),
-            BotCommand("help", "Show commands and guide"),
+            BotCommand("getfile", "📤 Deliver Drive file into chat (up to 2GB)"),
+            BotCommand("link", "🌐 Share Google Drive link into chat"),
+            BotCommand("links", "📑 Search & share Drive file links"),
+            BotCommand("folders", "🗂️ View folder hierarchy & structure"),
+            BotCommand("help", "📖 Show commands and user guide"),
         ]
 
         # Register across all scopes so Telegram clients display all commands in private chat

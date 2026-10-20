@@ -38,6 +38,36 @@ class MediaExtractorProvider(BaseProvider):
         "twitch.tv", "bilibili.com", "streamable.com", "rumble.com", "archive.org"
     )
 
+    COMMON_HEADERS: Dict[str, str] = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Mode": "navigate",
+    }
+
+    YOUTUBE_EXTRACTOR_ARGS: Dict[str, Any] = {
+        "youtube": {
+            "player_client": ["android", "ios", "web"],
+            "player_skip": ["webpage", "configs"],
+        }
+    }
+
+    @staticmethod
+    def _get_cookie_path() -> Optional[Path]:
+        """Locate optional cookies.txt file if configured or present in project root."""
+        env_cookie = os.getenv("COOKIES_FILE")
+        if env_cookie:
+            p = Path(env_cookie)
+            if p.exists():
+                return p
+        root_cookie = Path(__file__).resolve().parent.parent / "cookies.txt"
+        if root_cookie.exists():
+            return root_cookie
+        return None
+
     def can_handle(self, url: str) -> bool:
         """Check if URL belongs to a recognized media hosting platform."""
         try:
@@ -101,7 +131,12 @@ class MediaExtractorProvider(BaseProvider):
             "skip_download": True,
             "socket_timeout": timeout,
             "noplaylist": True,
+            "http_headers": self.COMMON_HEADERS,
+            "extractor_args": self.YOUTUBE_EXTRACTOR_ARGS,
         }
+        cookie_path = self._get_cookie_path()
+        if cookie_path:
+            ydl_opts["cookiefile"] = str(cookie_path)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -202,7 +237,12 @@ class MediaExtractorProvider(BaseProvider):
             "noplaylist": True,
             "socket_timeout": timeout,
             "retries": max_retries,
+            "http_headers": self.COMMON_HEADERS,
+            "extractor_args": self.YOUTUBE_EXTRACTOR_ARGS,
         }
+        cookie_path = self._get_cookie_path()
+        if cookie_path:
+            ydl_opts["cookiefile"] = str(cookie_path)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
