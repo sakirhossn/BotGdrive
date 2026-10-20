@@ -271,6 +271,20 @@ async def status_command(client: Client, message: Message) -> None:
     except ImportError:
         ytdlp_line = "⚠️ <b>Media Extractor (yt-dlp):</b> Not installed\n"
 
+    git_line = ""
+    try:
+        import subprocess
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(config.BASE_DIR),
+            text=True,
+            timeout=2.0
+        ).strip()
+        if commit_hash:
+            git_line = f"🔖 <b>Git Version:</b> <code>{html.escape(commit_hash)}</code>\n"
+    except Exception:
+        git_line = ""
+
     drive_status_line = (
         f"🟢 <b>Google Drive API:</b> Connected\n📁 <b>Drive Root Folder:</b> <code>{html.escape(root_name)}</code>\n"
         if drive_connected
@@ -281,6 +295,7 @@ async def status_command(client: Client, message: Message) -> None:
         "📊 <b>System & Service Status</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🟢 <b>MTProto Protocol:</b> Connected (2 GB Support Active)\n"
+        f"{git_line}"
         f"{drive_status_line}"
         f"{ytdlp_line}"
         f"📌 <b>Active Upload Destination:</b> <code>{html.escape(target_name)}</code>\n"
