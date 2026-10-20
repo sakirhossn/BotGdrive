@@ -183,6 +183,12 @@ class MediaExtractorProvider(BaseProvider):
                 raise PermissionError("This media requires private login or is restricted to authenticated accounts.") from exc
             if "age" in err_msg:
                 raise PermissionError("This media is age-restricted and requires an account to access.") from exc
+            if "no video formats" in err_msg or "no formats" in err_msg:
+                raise ValueError(
+                    "No video formats found. This usually means the server's yt-dlp package is outdated, "
+                    "or the platform requires login cookies.\n"
+                    "👉 Run on your VPS: ~/BotGdrive/.venv/bin/pip install -U yt-dlp && sudo systemctl restart botgdrive"
+                ) from exc
             raise ValueError(f"Media extraction failed: {exc}") from exc
         except Exception as exc:
             logger.exception("Unexpected error during media probe for %s: %s", url, exc)
@@ -289,4 +295,10 @@ class MediaExtractorProvider(BaseProvider):
                 raise PermissionError("This media is DRM-protected and cannot be downloaded.") from exc
             if "login" in err_msg or "sign in" in err_msg or "private" in err_msg:
                 raise PermissionError("This media requires private login credentials or permissions.") from exc
+            if "no video formats" in err_msg or "no formats" in err_msg:
+                raise ValueError(
+                    "No video formats found. This usually means the server's yt-dlp package is outdated, "
+                    "or the platform requires login cookies.\n"
+                    "👉 Run on your VPS: ~/BotGdrive/.venv/bin/pip install -U yt-dlp && sudo systemctl restart botgdrive"
+                ) from exc
             raise IOError(f"Media extraction failed: {exc}") from exc

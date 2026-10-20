@@ -264,6 +264,13 @@ async def status_command(client: Client, message: Message) -> None:
     target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
     dl_size = sum(f.stat().st_size for f in config.DOWNLOADS_DIR.glob("**/*") if f.is_file())
 
+    try:
+        import yt_dlp
+        ytdlp_ver = getattr(getattr(yt_dlp, "version", None), "__version__", "Installed")
+        ytdlp_line = f"⚡ <b>Media Extractor (yt-dlp):</b> v{ytdlp_ver}\n"
+    except ImportError:
+        ytdlp_line = "⚠️ <b>Media Extractor (yt-dlp):</b> Not installed\n"
+
     drive_status_line = (
         f"🟢 <b>Google Drive API:</b> Connected\n📁 <b>Drive Root Folder:</b> <code>{html.escape(root_name)}</code>\n"
         if drive_connected
@@ -275,6 +282,7 @@ async def status_command(client: Client, message: Message) -> None:
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🟢 <b>MTProto Protocol:</b> Connected (2 GB Support Active)\n"
         f"{drive_status_line}"
+        f"{ytdlp_line}"
         f"📌 <b>Active Upload Destination:</b> <code>{html.escape(target_name)}</code>\n"
         f"💾 <b>Local Cache Usage:</b> {utils.format_file_size(dl_size)}\n"
         "━━━━━━━━━━━━━━━━━━━━"
