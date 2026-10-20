@@ -7,6 +7,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 from typing import Any, Callable, Dict, Optional, Tuple
 import urllib.parse
 
@@ -30,8 +31,12 @@ class MediaExtractorProvider(BaseProvider):
     name: str = "Media Extractor"
 
     YOUTUBE_DOMAINS = ("youtube.com", "youtu.be", "m.youtube.com")
-    FACEBOOK_DOMAINS = ("facebook.com", "fb.watch", "m.facebook.com")
-    OTHER_MEDIA_DOMAINS = ("vimeo.com", "soundcloud.com", "dailymotion.com", "tiktok.com", "instagram.com")
+    FACEBOOK_DOMAINS = ("facebook.com", "fb.watch", "m.facebook.com", "fb.me")
+    OTHER_MEDIA_DOMAINS = (
+        "vimeo.com", "soundcloud.com", "dailymotion.com", "tiktok.com", "instagram.com",
+        "twitter.com", "x.com", "reddit.com", "redd.it", "threads.net", "pin.it", "pinterest.com",
+        "twitch.tv", "bilibili.com", "streamable.com", "rumble.com", "archive.org"
+    )
 
     def can_handle(self, url: str) -> bool:
         """Check if URL belongs to a recognized media hosting platform."""
@@ -59,6 +64,22 @@ class MediaExtractorProvider(BaseProvider):
             return "Instagram (Public Media)"
         if "tiktok" in host:
             return "TikTok (Public Video)"
+        if "twitter" in host or "x.com" in host:
+            return "Twitter/X (Public Video)"
+        if "reddit" in host or "redd.it" in host:
+            return "Reddit (Public Media)"
+        if "threads" in host:
+            return "Threads (Public Media)"
+        if "pinterest" in host or "pin.it" in host:
+            return "Pinterest (Public Video)"
+        if "twitch" in host:
+            return "Twitch (Clip/VOD)"
+        if "streamable" in host:
+            return "Streamable (Public Video)"
+        if "rumble" in host:
+            return "Rumble (Public Video)"
+        if "bilibili" in host:
+            return "Bilibili (Public Video)"
         if "soundcloud" in host:
             return "SoundCloud (Public Audio)"
         if "vimeo" in host:
@@ -168,9 +189,13 @@ class MediaExtractorProvider(BaseProvider):
                 if status_callback:
                     status_callback("⚡ Download complete, finalising file...")
 
+        has_ffmpeg = bool(shutil.which("ffmpeg"))
+        # If ffmpeg is available, combine best streams; otherwise fall back to single-stream mp4 to avoid crash
+        format_spec = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" if has_ffmpeg else "best[ext=mp4]/best"
+
         ydl_opts: Dict[str, Any] = {
             "outtmpl": output_template,
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": format_spec,
             "progress_hooks": [progress_hook],
             "quiet": True,
             "no_warnings": True,

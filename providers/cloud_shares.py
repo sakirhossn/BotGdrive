@@ -197,3 +197,168 @@ class GitHubProvider(BaseProvider):
         )
         res.provider_name = self.name
         return res
+
+
+class PixeldrainProvider(BaseProvider):
+    """Provider for Pixeldrain public file downloads."""
+
+    name: str = "Pixeldrain"
+
+    def __init__(self, http_provider: Optional[DirectHttpProvider] = None) -> None:
+        self.http_provider = http_provider or DirectHttpProvider()
+
+    def can_handle(self, url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            return "pixeldrain.com" in (parsed.hostname or "").lower()
+        except Exception:
+            return False
+
+    def normalize_url(self, raw_url: str) -> str:
+        """Convert pixeldrain.com/u/{id} or /d/{id} to direct download API link."""
+        parsed = urllib.parse.urlsplit(raw_url)
+        m = re.search(r"/(?:u|d)/([a-zA-Z0-9_-]+)", parsed.path)
+        if m:
+            file_id = m.group(1)
+            return f"https://pixeldrain.com/api/file/{file_id}"
+        return raw_url
+
+    def probe(self, url: str, timeout: float = 12.0) -> ProviderMetadata:
+        direct_url = self.normalize_url(url)
+        meta = self.http_provider.probe(direct_url, timeout=timeout)
+        meta.url = url
+        meta.provider_name = self.name
+        return meta
+
+    def download(
+        self,
+        url: str,
+        dest_path: Path | str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+        max_bytes: int = 2000 * 1024 * 1024,
+        timeout: float = 30.0,
+        max_retries: int = 5,
+    ) -> DownloadResult:
+        direct_url = self.normalize_url(url)
+        res = self.http_provider.download(
+            url=direct_url,
+            dest_path=dest_path,
+            progress_callback=progress_callback,
+            status_callback=status_callback,
+            max_bytes=max_bytes,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        res.provider_name = self.name
+        return res
+
+
+class MediafireProvider(BaseProvider):
+    """Provider for Mediafire public downloads."""
+
+    name: str = "Mediafire"
+
+    def __init__(self, http_provider: Optional[DirectHttpProvider] = None) -> None:
+        self.http_provider = http_provider or DirectHttpProvider()
+
+    def can_handle(self, url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            return "mediafire.com" in (parsed.hostname or "").lower()
+        except Exception:
+            return False
+
+    def resolve_direct_url(self, raw_url: str, timeout: float = 12.0) -> str:
+        """Scrape direct download link from Mediafire landing page."""
+        try:
+            req = urllib.request.Request(
+                raw_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                html_bytes = resp.read(128 * 1024)
+                html_text = html_bytes.decode("utf-8", errors="ignore")
+                m = re.search(r'href="(https?://download\d*\.mediafire\.com/[^"]+)"', html_text)
+                if m:
+                    return m.group(1)
+                m2 = re.search(r'aria-label="Download file"\s+href="([^"]+)"', html_text)
+                if m2:
+                    return m2.group(1)
+        except Exception as exc:
+            logger.warning("Could not extract Mediafire direct link: %s", exc)
+        return raw_url
+
+    def probe(self, url: str, timeout: float = 12.0) -> ProviderMetadata:
+        direct_url = self.resolve_direct_url(url, timeout=timeout)
+        meta = self.http_provider.probe(direct_url, timeout=timeout)
+        meta.url = url
+        meta.provider_name = self.name
+        return meta
+
+    def download(
+        self,
+        url: str,
+        dest_path: Path | str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+        max_bytes: int = 2000 * 1024 * 1024,
+        timeout: float = 30.0,
+        max_retries: int = 5,
+    ) -> DownloadResult:
+        direct_url = self.resolve_direct_url(url, timeout=timeout)
+        res = self.http_provider.download(
+            url=direct_url,
+            dest_path=dest_path,
+            progress_callback=progress_callback,
+            status_callback=status_callback,
+            max_bytes=max_bytes,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        res.provider_name = self.name
+        return res
+
+
+class CatboxProvider(BaseProvider):
+    """Provider for Catbox and Litterbox direct uploads."""
+
+    name: str = "Catbox"
+
+    def __init__(self, http_provider: Optional[DirectHttpProvider] = None) -> None:
+        self.http_provider = http_provider or DirectHttpProvider()
+
+    def can_handle(self, url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            return "catbox.moe" in (parsed.hostname or "").lower()
+        except Exception:
+            return False
+
+    def probe(self, url: str, timeout: float = 12.0) -> ProviderMetadata:
+        meta = self.http_provider.probe(url, timeout=timeout)
+        meta.provider_name = self.name
+        return meta
+
+    def download(
+        self,
+        url: str,
+        dest_path: Path | str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+        max_bytes: int = 2000 * 1024 * 1024,
+        timeout: float = 30.0,
+        max_retries: int = 5,
+    ) -> DownloadResult:
+        res = self.http_provider.download(
+            url=url,
+            dest_path=dest_path,
+            progress_callback=progress_callback,
+            status_callback=status_callback,
+            max_bytes=max_bytes,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        res.provider_name = self.name
+        return res
+

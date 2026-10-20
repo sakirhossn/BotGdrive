@@ -294,6 +294,50 @@ class DriveService:
         _walk(target_root, 0)
         return tree
 
+    def get_parent_folder(self, folder_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve the parent folder within the managed root hierarchy."""
+        if not folder_id or folder_id == self.root_folder_id:
+            return None
+        try:
+            meta = self.get_metadata(folder_id)
+            parents = meta.get("parents", [])
+            if not parents:
+                return None
+            parent_id = parents[0]
+            if not self.is_within_managed_root(parent_id):
+                return None
+            parent_meta = self.get_metadata(parent_id)
+            return {"id": parent_id, "name": parent_meta.get("name", "Parent Folder")}
+        except Exception as exc:
+            logger.debug("Could not resolve parent for folder %s: %s", folder_id, exc)
+            return None
+
+    def get_folder_breadcrumbs(self, folder_id: str) -> List[Dict[str, Any]]:
+        """Return list of ancestor folders from root down to folder_id."""
+        if not folder_id:
+            root_meta = self.get_root_folder()
+            return [{"id": self.root_folder_id, "name": root_meta.get("name", "Root")}]
+
+        chain: List[Dict[str, Any]] = []
+        curr_id = folder_id
+        visited: set[str] = set()
+
+        while curr_id and curr_id not in visited:
+            visited.add(curr_id)
+            try:
+                meta = self.get_metadata(curr_id)
+                name = meta.get("name", "Folder") if curr_id != self.root_folder_id else meta.get("name", "Root")
+                chain.append({"id": curr_id, "name": name})
+                if curr_id == self.root_folder_id:
+                    break
+                parents = meta.get("parents", [])
+                curr_id = parents[0] if parents else None
+            except Exception:
+                break
+
+        chain.reverse()
+        return chain
+
     def create_folder(self, name: str, parent_id: str) -> Dict[str, Any]:
         """Create a new folder inside parent_id."""
         if not self.is_within_managed_root(parent_id):

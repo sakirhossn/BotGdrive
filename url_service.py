@@ -75,6 +75,16 @@ def normalize_provider_url(raw_url: str) -> Tuple[str, Optional[str]]:
     if "raw.githubusercontent.com" in hostname:
         return raw_url, "GitHub Raw"
 
+    # 4. Pixeldrain
+    if "pixeldrain.com" in hostname:
+        m = re.search(r"/(?:u|d)/([a-zA-Z0-9_-]+)", parsed.path)
+        if m:
+            return f"https://pixeldrain.com/api/file/{m.group(1)}", "Pixeldrain"
+
+    # 5. Catbox / Litterbox
+    if "catbox.moe" in hostname:
+        return raw_url, "Catbox"
+
     return raw_url, None
 
 

@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from providers.base import BaseProvider, DownloadResult, ProviderMetadata
-from providers.cloud_shares import DropboxProvider, GDrivePublicProvider, GitHubProvider
+from providers.cloud_shares import (
+    CatboxProvider,
+    DropboxProvider,
+    GDrivePublicProvider,
+    GitHubProvider,
+    MediafireProvider,
+    PixeldrainProvider,
+)
 from providers.direct_http import DirectHttpProvider
 from providers.media_extractor import MediaExtractorProvider
 
@@ -40,11 +47,32 @@ class ProviderRegistry:
 
         return self._fallback_provider
 
+    def get_media_provider(self) -> Optional[BaseProvider]:
+        """Retrieve registered MediaExtractorProvider if available."""
+        for provider in self._providers:
+            if isinstance(provider, MediaExtractorProvider):
+                return provider
+        return None
+
     def probe(self, url: str, timeout: float = 12.0) -> ProviderMetadata:
-        """Probe a URL using the best matching provider."""
+        """Probe a URL using the best matching provider with smart media fallback for HTML pages."""
         provider = self.get_provider(url)
         logger.debug("Probing URL %s with provider %s", url, provider.name)
-        return provider.probe(url, timeout=timeout)
+        meta = provider.probe(url, timeout=timeout)
+
+        # If DirectHttpProvider detected an HTML webpage, check if MediaExtractor can extract media from it (e.g. video page, generic HTML5, shortener)
+        if meta.is_html and provider.name == "Direct HTTP":
+            media_provider = self.get_media_provider()
+            if media_provider:
+                try:
+                    media_meta = media_provider.probe(url, timeout=timeout)
+                    if not media_meta.is_html:
+                        logger.info("Direct HTTP returned HTML, but MediaExtractor successfully resolved media for %s", url)
+                        return media_meta
+                except Exception as exc:
+                    logger.debug("Media fallback probe failed for %s: %s", url, exc)
+
+        return meta
 
     def download(
         self,
@@ -56,24 +84,44 @@ class ProviderRegistry:
         timeout: float = 30.0,
         max_retries: int = 5,
     ) -> DownloadResult:
-        """Download a URL using the best matching provider."""
+        """Download a URL using the best matching provider with fallback support."""
         provider = self.get_provider(url)
         logger.info("Executing download for '%s' using provider %s", url, provider.name)
-        return provider.download(
-            url=url,
-            dest_path=dest_path,
-            progress_callback=progress_callback,
-            status_callback=status_callback,
-            max_bytes=max_bytes,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+        try:
+            return provider.download(
+                url=url,
+                dest_path=dest_path,
+                progress_callback=progress_callback,
+                status_callback=status_callback,
+                max_bytes=max_bytes,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        except Exception as exc:
+            # If Direct HTTP failed with non-binary content, attempt MediaExtractor fallback
+            if provider.name == "Direct HTTP":
+                media_provider = self.get_media_provider()
+                if media_provider:
+                    logger.info("Direct HTTP download failed, falling back to MediaExtractor for %s", url)
+                    return media_provider.download(
+                        url=url,
+                        dest_path=dest_path,
+                        progress_callback=progress_callback,
+                        status_callback=status_callback,
+                        max_bytes=max_bytes,
+                        timeout=timeout,
+                        max_retries=max_retries,
+                    )
+            raise
 
 
 # Global default registry instance with prioritized providers
 default_registry = ProviderRegistry()
 default_registry.register(DropboxProvider())
 default_registry.register(GDrivePublicProvider())
+default_registry.register(PixeldrainProvider())
+default_registry.register(MediafireProvider())
+default_registry.register(CatboxProvider())
 default_registry.register(GitHubProvider())
 default_registry.register(MediaExtractorProvider())
 default_registry.register(DirectHttpProvider())

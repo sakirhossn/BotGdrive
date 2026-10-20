@@ -126,6 +126,8 @@ def build_folder_browser_keyboard(
     page: int = 0,
     is_select_mode: bool = False,
     items_per_page: int = 6,
+    folder_name: Optional[str] = None,
+    parent_name: Optional[str] = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build an interactive paginated folder browser with direct delete buttons."""
     total_folders = len(folders)
@@ -143,6 +145,11 @@ def build_folder_browser_keyboard(
         buttons.append(
             [InlineKeyboardButton("✅ Set THIS folder as Upload Destination", callback_data=f"sel:{folder_id}")]
         )
+        if parent_id and parent_id != folder_id:
+            back_lbl = f"🔙 Back to Parent ({parent_name})" if parent_name else "🔙 Back to Parent Folder"
+            buttons.append(
+                [InlineKeyboardButton(back_lbl, callback_data=f"nav:sel_mode:{parent_id}")]
+            )
 
     for is_folder, item in page_items:
         item_name = item.get("name", "Untitled")
@@ -189,8 +196,9 @@ def build_folder_browser_keyboard(
     buttons.append(bottom_row)
 
     mode_title = "📂 <b>Select Upload Destination Folder:</b>" if is_select_mode else "📁 <b>Drive Browser:</b>"
+    curr_disp = f"\n📁 <b>Current:</b> <code>{html.escape(folder_name)}</code>" if folder_name else ""
     text = (
-        f"{mode_title}\n\n"
+        f"{mode_title}{curr_disp}\n\n"
         f"Folders: {total_folders} | Files: {total_files}\n"
         f"Page {page + 1} of {total_pages}"
     )
@@ -413,6 +421,18 @@ async def folders_command(client: Client, message: Message) -> None:
         lines.append(f"📌 <b>Active Upload Target:</b> <code>{html.escape(target_name)}</code>")
         lines.append("💡 <i>Click any folder button to explore or change target:</i>")
 
+        if target_id != config.DRIVE_FOLDER_ID:
+            try:
+                parent_info = await asyncio.to_thread(drive_service.default_drive_service.get_parent_folder, target_id)
+                if parent_info:
+                    p_name = parent_info.get("name", "Parent")
+                    p_id = parent_info.get("id")
+                    buttons.append([
+                        InlineKeyboardButton(f"🔙 Set Parent Target ({p_name})", callback_data=f"sel:{p_id}")
+                    ])
+            except Exception as p_err:
+                logger.debug("Could not resolve parent for hierarchy back button: %s", p_err)
+
         buttons.append([
             InlineKeyboardButton("📂 Set Target Folder", callback_data="nav:select_mode:root"),
             InlineKeyboardButton("➕ New Folder", callback_data="act:mkdir"),
@@ -489,6 +509,7 @@ async def setfolder_command(client: Client, message: Message) -> None:
         root_id = config.DRIVE_FOLDER_ID
         try:
             folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, root_id)
+            root_meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, root_id)
             text, markup = build_folder_browser_keyboard(
                 folder_id=root_id,
                 parent_id=None,
@@ -496,6 +517,7 @@ async def setfolder_command(client: Client, message: Message) -> None:
                 files=files,
                 page=0,
                 is_select_mode=True,
+                folder_name=root_meta.get("name", "Root"),
             )
             await wait_msg.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
         except Exception as exc:
@@ -572,6 +594,24 @@ async def cancel_command(client: Client, message: Message) -> None:
     """Handle /cancel command."""
     state_manager.clear_user_action(message.from_user.id)
     await message.reply_text("✅ Action cancelled.")
+
+
+@restricted
+async def reloadcommands_command(client: Client, message: Message) -> None:
+    """Manually re-register command menu across all scopes with Telegram."""
+    wait_msg = await message.reply_text("🔄 <b>Refreshing bot commands with Telegram...</b>", parse_mode=ParseMode.HTML)
+    try:
+        import bot
+        await bot.set_menu_commands(client)
+        await wait_msg.edit_text(
+            "✅ <b>Bot commands re-registered successfully!</b>\n\n"
+            "All 16 commands have been pushed to Telegram for private chats.\n"
+            "💡 <i>Tip: If your Telegram app still displays the old menu, force-close or restart Telegram to refresh its local menu cache.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        logger.exception("Failed to re-register bot commands: %s", exc)
+        await wait_msg.edit_text(f"❌ <b>Error:</b> {html.escape(str(exc))}", parse_mode=ParseMode.HTML)
 
 
 @restricted
@@ -925,6 +965,7 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 files=files,
                 page=0,
                 is_select_mode=False,
+                folder_name=meta.get("name", "Root") if parent_id != config.DRIVE_FOLDER_ID else "Root",
             )
             await callback.message.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
         except Exception:
@@ -1079,6 +1120,18 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             lines.append(f"📌 <b>Active Upload Target:</b> <code>{html.escape(target_name)}</code>")
             lines.append("💡 <i>Click any folder button to explore or change target:</i>")
 
+            if target_id != config.DRIVE_FOLDER_ID:
+                try:
+                    parent_info = await asyncio.to_thread(drive_service.default_drive_service.get_parent_folder, target_id)
+                    if parent_info:
+                        p_name = parent_info.get("name", "Parent")
+                        p_id = parent_info.get("id")
+                        buttons.append([
+                            InlineKeyboardButton(f"🔙 Set Parent Target ({p_name})", callback_data=f"sel:{p_id}")
+                        ])
+                except Exception as p_err:
+                    logger.debug("Could not resolve parent for hierarchy back button: %s", p_err)
+
             buttons.append([
                 InlineKeyboardButton("📂 Set Target Folder", callback_data="nav:select_mode:root"),
                 InlineKeyboardButton("➕ New Folder", callback_data="act:mkdir"),
@@ -1144,6 +1197,13 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, target_folder_id)
             meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, target_folder_id)
             parent_id = meta.get("parents", [None])[0] if target_folder_id != config.DRIVE_FOLDER_ID else None
+            parent_name = None
+            if parent_id and parent_id != target_folder_id:
+                try:
+                    p_meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, parent_id)
+                    parent_name = p_meta.get("name", "Parent")
+                except Exception:
+                    parent_name = "Parent"
 
             text, markup = build_folder_browser_keyboard(
                 folder_id=target_folder_id,
@@ -1152,6 +1212,8 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 files=files,
                 page=0,
                 is_select_mode=is_select_mode,
+                folder_name=meta.get("name", "Root") if target_folder_id != config.DRIVE_FOLDER_ID else "Root",
+                parent_name=parent_name,
             )
             await callback.message.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
         except Exception as exc:
@@ -1167,6 +1229,13 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
             folders, files = await asyncio.to_thread(drive_service.default_drive_service.list_children, folder_id)
             meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, folder_id)
             parent_id = meta.get("parents", [None])[0] if folder_id != config.DRIVE_FOLDER_ID else None
+            parent_name = None
+            if parent_id and parent_id != folder_id:
+                try:
+                    p_meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, parent_id)
+                    parent_name = p_meta.get("name", "Parent")
+                except Exception:
+                    parent_name = "Parent"
 
             text, markup = build_folder_browser_keyboard(
                 folder_id=folder_id,
@@ -1175,6 +1244,8 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                 files=files,
                 page=page,
                 is_select_mode=is_select_mode,
+                folder_name=meta.get("name", "Root") if folder_id != config.DRIVE_FOLDER_ID else "Root",
+                parent_name=parent_name,
             )
             await callback.message.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
             await callback.answer()
@@ -1459,9 +1530,16 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
                     logger.debug("Could not send error chat notification: %s", notif_err)
             finally:
                 _ACTIVE_TRANSFER.clear()
-                if local_dest.exists():
-                    local_dest.unlink(missing_ok=True)
-                    logger.info("Cleaned up temporary URL download file '%s'", local_dest)
+                try:
+                    if local_dest.exists():
+                        local_dest.unlink(missing_ok=True)
+                    if "dest_path" in locals() and dest_path and Path(dest_path).exists():
+                        Path(dest_path).unlink(missing_ok=True)
+                    for leftover in config.DOWNLOADS_DIR.glob(f"{unique_id}_*"):
+                        leftover.unlink(missing_ok=True)
+                    logger.info("Cleaned up all temporary files for transfer '%s'", unique_id)
+                except Exception as clean_err:
+                    logger.debug("Error during temp cleanup for %s: %s", unique_id, clean_err)
         return
 
     await callback.answer()

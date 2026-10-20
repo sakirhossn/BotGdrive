@@ -1,7 +1,14 @@
 """Providers package for Universal Link Downloader."""
 
 from providers.base import BaseProvider, DownloadResult, ProviderMetadata
-from providers.cloud_shares import DropboxProvider, GDrivePublicProvider, GitHubProvider
+from providers.cloud_shares import (
+    CatboxProvider,
+    DropboxProvider,
+    GDrivePublicProvider,
+    GitHubProvider,
+    MediafireProvider,
+    PixeldrainProvider,
+)
 from providers.direct_http import (
     DirectHttpProvider,
     SSRFSecurityError,
@@ -20,6 +27,9 @@ __all__ = [
     "DropboxProvider",
     "GDrivePublicProvider",
     "GitHubProvider",
+    "MediafireProvider",
+    "PixeldrainProvider",
+    "CatboxProvider",
     "MediaExtractorProvider",
     "SSRFSecurityError",
     "is_ip_allowed",

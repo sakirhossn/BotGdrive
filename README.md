@@ -103,6 +103,67 @@ In Render's **Environment** tab, add:
 
 ---
 
+## 🐧 Oracle Cloud Ubuntu — Operational Cheat Sheet & Live Updates
+
+### 1. Daily Service Management Commands
+```bash
+# Check bot status and health
+sudo systemctl status botgdrive
+
+# Follow real-time live logs
+sudo journalctl -u botgdrive -f
+
+# View last 50 lines of logs
+sudo journalctl -u botgdrive -n 50 --no-pager
+
+# Restart the bot service
+sudo systemctl restart botgdrive
+
+# Stop / Start the bot service
+sudo systemctl stop botgdrive
+sudo systemctl start botgdrive
+```
+
+### 2. How to Update Bot on Live Ubuntu Server
+```bash
+# 1. Navigate to the bot repository
+cd ~/BotGdrive
+
+# 2. Stop running service
+sudo systemctl stop botgdrive
+
+# 3. Pull latest code from GitHub
+git pull origin main
+
+# 4. Activate virtual environment and update packages
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 5. Ensure ffmpeg is installed for video merging
+sudo apt update && sudo apt install -y ffmpeg
+
+# 6. Restart the bot background service
+sudo systemctl restart botgdrive
+
+# 7. Check status and logs to verify it's active
+sudo systemctl status botgdrive
+sudo journalctl -u botgdrive -f
+```
+
+### 3. Server Monitoring & Maintenance
+```bash
+# Check free disk space (ensure at least 5-10 GB free for 2 GB transfers)
+df -h
+
+# Check RAM and Swap usage
+free -m
+
+# View active processes
+htop
+```
+
+---
+
 ## 🔒 Security & Boundaries
 - **Whitelist Protection**: Every incoming message and callback is strictly validated against `ALLOWED_USER_IDS`.
 - **Drive Boundary Isolation**: Operations are restricted strictly within `DRIVE_FOLDER_ID`.

@@ -21,7 +21,12 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 
 from pyrogram import Client, filters, idle
-from pyrogram.types import BotCommand
+from pyrogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeDefault,
+)
 
 import config
 import drive_service
@@ -94,6 +99,9 @@ def create_app() -> Client:
     app.on_message(filters.command("delete") & filters.private & filters.incoming)(handlers.delete_command)
     app.on_message(filters.command(["url", "download", "dl"]) & filters.private & filters.incoming)(handlers.url_command)
     app.on_message(filters.command("settoken") & filters.private & filters.incoming)(handlers.settoken_command)
+    app.on_message(filters.command(["reloadcommands", "reload_commands"]) & filters.private & filters.incoming)(
+        handlers.reloadcommands_command
+    )
     app.on_message(filters.command("cancel") & filters.private & filters.incoming)(handlers.cancel_command)
 
     # Group & Private Commands (for Admins / Whitelisted)
@@ -117,7 +125,7 @@ def create_app() -> Client:
     app.on_message(
         filters.text
         & filters.incoming
-        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "download", "dl", "settoken", "cancel", "getfile", "link", "links", "upload", "save"])
+        & ~filters.command(["start", "help", "status", "list", "browse", "folders", "folder", "setfolder", "mkdir", "search", "delete", "url", "download", "dl", "settoken", "reloadcommands", "reload_commands", "cancel", "getfile", "link", "links", "upload", "save"])
         & filters.private
     )(handlers.text_handler)
 
@@ -125,12 +133,12 @@ def create_app() -> Client:
 
 
 async def set_menu_commands(app: Client) -> None:
-    """Register command menu autocomplete with Telegram."""
+    """Register command menu autocomplete with Telegram for both Default and AllPrivateChats scopes."""
     try:
         commands = [
             BotCommand("start", "Open main dashboard menu"),
-            BotCommand("url", "Download file from a public URL to Drive"),
-            BotCommand("download", "Download file from link (/download <url>)"),
+            BotCommand("url", "Download file/media from any public link to Drive"),
+            BotCommand("download", "Download from link (/download <url>)"),
             BotCommand("list", "Browse Google Drive files and folders"),
             BotCommand("folders", "View folder hierarchy and structure"),
             BotCommand("setfolder", "Select upload destination folder"),
@@ -141,11 +149,24 @@ async def set_menu_commands(app: Client) -> None:
             BotCommand("link", "Share Google Drive link into chat"),
             BotCommand("links", "Search and share Drive file links"),
             BotCommand("status", "Check bot and Drive connection status"),
+            BotCommand("reloadcommands", "Refresh Telegram bot command list"),
             BotCommand("help", "Show commands and guide"),
             BotCommand("cancel", "Cancel current operation"),
         ]
-        await app.set_bot_commands(commands)
-        logger.info("Bot command menu registered successfully.")
+
+        group_commands = [
+            BotCommand("getfile", "Deliver a Drive file into the chat (up to 2GB)"),
+            BotCommand("link", "Share Google Drive link into chat"),
+            BotCommand("links", "Search and share Drive file links"),
+            BotCommand("folders", "View folder hierarchy and structure"),
+            BotCommand("help", "Show commands and guide"),
+        ]
+
+        # Register across all scopes so Telegram clients display all commands in private chat
+        await app.set_bot_commands(commands, scope=BotCommandScopeDefault())
+        await app.set_bot_commands(commands, scope=BotCommandScopeAllPrivateChats())
+        await app.set_bot_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+        logger.info("Bot command menu registered successfully across Default, AllPrivateChats, and AllGroupChats scopes.")
     except Exception as exc:
         logger.warning("Could not set bot commands: %s", exc)
 

@@ -360,6 +360,77 @@ class TestMediaExtractorProvider(unittest.TestCase):
                 self.assertIn("YouTube", result.provider_name)
 
 
+    def test_additional_cloud_providers(self) -> None:
+        """Verify Pixeldrain, Mediafire, and Catbox providers."""
+        from providers.cloud_shares import CatboxProvider, MediafireProvider, PixeldrainProvider
+
+        # Pixeldrain
+        pd = PixeldrainProvider()
+        self.assertTrue(pd.can_handle("https://pixeldrain.com/u/abc12345"))
+        self.assertEqual(pd.normalize_url("https://pixeldrain.com/u/abc12345"), "https://pixeldrain.com/api/file/abc12345")
+        self.assertFalse(pd.can_handle("https://example.com/file"))
+
+        # Mediafire
+        mf = MediafireProvider()
+        self.assertTrue(mf.can_handle("https://www.mediafire.com/file/xyz123/doc.pdf/file"))
+        self.assertFalse(mf.can_handle("https://dropbox.com/s/123"))
+
+        # Catbox
+        cb = CatboxProvider()
+        self.assertTrue(cb.can_handle("https://files.catbox.moe/file.mp4"))
+        self.assertTrue(cb.can_handle("https://litterbox.catbox.moe/temp.zip"))
+        self.assertFalse(cb.can_handle("https://youtube.com"))
+
+    def test_expanded_media_domains(self) -> None:
+        """Verify broadened media domain recognition (Twitter/X, Reddit, Threads, Pinterest, etc.)."""
+        test_urls = [
+            "https://twitter.com/user/status/123456789",
+            "https://x.com/user/status/987654321",
+            "https://www.reddit.com/r/videos/comments/xyz/clip",
+            "https://threads.net/@user/post/abc123",
+            "https://www.pinterest.com/pin/123456789/",
+            "https://pin.it/abcXYZ",
+            "https://www.twitch.tv/videos/123456",
+            "https://streamable.com/abc12",
+        ]
+        for url in test_urls:
+            with self.subTest(url=url):
+                self.assertTrue(self.provider.can_handle(url))
+
+    def test_registry_html_fallback_to_media(self) -> None:
+        """Verify ProviderRegistry falls back to MediaExtractor when Direct HTTP detects HTML."""
+        from providers.registry import ProviderRegistry
+        reg = ProviderRegistry()
+        reg.register(self.provider)  # MediaExtractorProvider
+
+        mock_direct = MagicMock()
+        mock_direct.name = "Direct HTTP"
+        mock_direct.can_handle.return_value = True
+        mock_direct.probe.return_value = ProviderMetadata(
+            url="https://unknown-video-host.com/watch?v=123",
+            final_url="https://unknown-video-host.com/watch?v=123",
+            provider_name="Direct HTTP",
+            filename="watch.html",
+            is_html=True,
+            is_direct=False,
+        )
+        reg.register(mock_direct)
+
+        with patch.object(self.provider, "probe") as mock_media_probe:
+            mock_media_probe.return_value = ProviderMetadata(
+                url="https://unknown-video-host.com/watch?v=123",
+                final_url="https://unknown-video-host.com/watch?v=123",
+                provider_name="Media Extractor",
+                filename="cool_video.mp4",
+                is_html=False,
+                is_direct=True,
+                size_bytes=1048576,
+            )
+            meta = reg.probe("https://unknown-video-host.com/watch?v=123")
+            self.assertFalse(meta.is_html)
+            self.assertEqual(meta.filename, "cool_video.mp4")
+
+
 if __name__ == "__main__":
     unittest.main()
 
