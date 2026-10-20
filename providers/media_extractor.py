@@ -315,10 +315,12 @@ class MediaExtractorProvider(BaseProvider):
 
         except yt_dlp.utils.DownloadError as exc:
             err_msg = str(exc).lower()
+            if "unavailable" in err_msg or "deleted" in err_msg or "not available" in err_msg or "does not exist" in err_msg:
+                raise ValueError("This video is unavailable or has been deleted by its uploader on YouTube.") from exc
             if "drm" in err_msg or "widevine" in err_msg or "encrypted" in err_msg:
                 raise PermissionError("This media is DRM-protected and cannot be extracted.") from exc
-            if "login" in err_msg or "sign in" in err_msg or "private" in err_msg or "account" in err_msg:
-                raise PermissionError("This media requires private login or is restricted to authenticated accounts.") from exc
+            if "private" in err_msg or "login" in err_msg or "sign in" in err_msg or "account" in err_msg:
+                raise PermissionError("This media requires private login or is set to private by its owner.") from exc
             if "age" in err_msg:
                 raise PermissionError("This media is age-restricted and requires an account to access.") from exc
             if "no video formats" in err_msg or "no formats" in err_msg:
@@ -434,10 +436,12 @@ class MediaExtractorProvider(BaseProvider):
 
         except yt_dlp.utils.DownloadError as exc:
             err_msg = str(exc).lower()
+            if "unavailable" in err_msg or "deleted" in err_msg or "not available" in err_msg or "does not exist" in err_msg:
+                raise ValueError("This video is unavailable or has been deleted by its uploader on YouTube.") from exc
             if "drm" in err_msg or "widevine" in err_msg:
                 raise PermissionError("This media is DRM-protected and cannot be downloaded.") from exc
-            if "login" in err_msg or "sign in" in err_msg or "private" in err_msg:
-                raise PermissionError("This media requires private login credentials or permissions.") from exc
+            if "private" in err_msg or "login" in err_msg or "sign in" in err_msg:
+                raise PermissionError("This media requires private login or is set to private by its owner.") from exc
             if "no video formats" in err_msg or "no formats" in err_msg:
                 cli_res = self._download_via_cli(
                     url=url,
