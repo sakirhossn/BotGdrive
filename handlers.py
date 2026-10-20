@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import functools
+
+# Backward compatibility polyfill for Python 3.8 (<3.9 lacks asyncio.to_thread)
+if not hasattr(asyncio, "to_thread"):
+    async def _compat_to_thread(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
+    asyncio.to_thread = _compat_to_thread
 import html
 import json
 import logging
@@ -285,6 +293,10 @@ async def status_command(client: Client, message: Message) -> None:
     except Exception:
         git_line = ""
 
+    import sys
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py_line = f"🐍 <b>Python Runtime:</b> v{py_ver}" + (" <i>(⚠️ Python 3.10+ needed for modern yt-dlp)</i>\n" if sys.version_info < (3, 9) else "\n")
+
     drive_status_line = (
         f"🟢 <b>Google Drive API:</b> Connected\n📁 <b>Drive Root Folder:</b> <code>{html.escape(root_name)}</code>\n"
         if drive_connected
@@ -296,6 +308,7 @@ async def status_command(client: Client, message: Message) -> None:
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🟢 <b>MTProto Protocol:</b> Connected (2 GB Support Active)\n"
         f"{git_line}"
+        f"{py_line}"
         f"{drive_status_line}"
         f"{ytdlp_line}"
         f"📌 <b>Active Upload Destination:</b> <code>{html.escape(target_name)}</code>\n"

@@ -10,6 +10,17 @@ import os
 from pathlib import Path
 from typing import Set
 
+import asyncio
+import functools
+
+# Backward compatibility polyfill for Python 3.8 (<3.9 lacks asyncio.to_thread)
+if not hasattr(asyncio, "to_thread"):
+    async def _compat_to_thread(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
+    asyncio.to_thread = _compat_to_thread
+
 from dotenv import load_dotenv
 
 # Base paths

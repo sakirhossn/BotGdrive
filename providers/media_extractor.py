@@ -68,6 +68,136 @@ class MediaExtractorProvider(BaseProvider):
             return root_cookie
         return None
 
+    @staticmethod
+    def _find_cli_binary() -> Optional[str]:
+        """Locate standalone or system yt-dlp binary if available."""
+        import sys
+        cli = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+        if cli:
+            return cli
+
+        venv_bin = Path(sys.executable).parent
+        for candidate in (venv_bin / "yt-dlp", venv_bin / "yt-dlp.exe"):
+            if candidate.is_file():
+                return str(candidate)
+
+        for p in ("/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp", "/opt/yt-dlp/yt-dlp"):
+            candidate = Path(p)
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+
+        return None
+
+    def _probe_via_cli(self, url: str, timeout: float = 12.0) -> Optional[ProviderMetadata]:
+        """Fallback probe using standalone yt-dlp CLI."""
+        cli_bin = self._find_cli_binary()
+        if not cli_bin:
+            return None
+        cmd = [
+            cli_bin,
+            "--dump-json",
+            "--no-warnings",
+            "--skip-download",
+            "--socket-timeout", str(int(timeout)),
+            url,
+        ]
+        cookie_path = self._get_cookie_path()
+        if cookie_path:
+            cmd.extend(["--cookies", str(cookie_path)])
+
+        try:
+            import subprocess
+            import json
+            res = subprocess.check_output(cmd, text=True, timeout=timeout + 5)
+            info = json.loads(res)
+            parsed = urllib.parse.urlsplit(url)
+            host = parsed.hostname or "media-host"
+            platform_name = self._get_platform_name(host)
+            raw_title = info.get("title") or info.get("id") or "media_file"
+            ext = info.get("ext") or "mp4"
+            safe_title = utils.sanitize_filename(f"{raw_title}.{ext}")
+            size = info.get("filesize") or info.get("filesize_approx") or 0
+            mime_type = mimetypes.guess_type(safe_title)[0] or (
+                "audio/mpeg" if ext in ("mp3", "m4a", "flac", "ogg") else "video/mp4"
+            )
+            return ProviderMetadata(
+                url=url,
+                final_url=info.get("webpage_url") or url,
+                provider_name=platform_name,
+                filename=safe_title,
+                size_bytes=size,
+                mime_type=mime_type,
+                is_direct=True,
+                is_html=False,
+                host=host,
+                extra={
+                    "title": raw_title,
+                    "duration": info.get("duration") or 0,
+                    "thumbnail": info.get("thumbnail"),
+                    "uploader": info.get("uploader"),
+                },
+            )
+        except Exception as exc:
+            logger.warning("CLI probe fallback failed: %s", exc)
+            return None
+
+    def _download_via_cli(
+        self,
+        url: str,
+        dest_path: Path | str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+        max_bytes: int = 2000 * 1024 * 1024,
+        timeout: float = 30.0,
+    ) -> Optional[DownloadResult]:
+        """Fallback download using standalone yt-dlp CLI."""
+        cli_bin = self._find_cli_binary()
+        if not cli_bin:
+            return None
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        output_template = str(dest.parent / f"{dest.stem}.%(ext)s")
+        cmd = [
+            cli_bin,
+            "-o", output_template,
+            "--no-warnings",
+            "--socket-timeout", str(int(timeout)),
+            "--format", "best[ext=mp4]/best",
+            url,
+        ]
+        cookie_path = self._get_cookie_path()
+        if cookie_path:
+            cmd.extend(["--cookies", str(cookie_path)])
+
+        try:
+            import subprocess
+            if status_callback:
+                status_callback("⚡ Extracting media via standalone yt-dlp engine...")
+            subprocess.check_call(cmd, timeout=timeout * 10)
+            candidates = list(dest.parent.glob(f"{dest.stem}.*"))
+            if candidates:
+                actual_filepath = candidates[0]
+                file_size = actual_filepath.stat().st_size
+                if max_bytes and file_size > max_bytes:
+                    actual_filepath.unlink(missing_ok=True)
+                    raise ValueError(f"Extracted media file ({utils.format_file_size(file_size)}) exceeded {utils.format_file_size(max_bytes)}.")
+                parsed = urllib.parse.urlsplit(url)
+                host = parsed.hostname or "media-host"
+                platform_name = self._get_platform_name(host)
+                mime_type = mimetypes.guess_type(actual_filepath.name)[0] or "video/mp4"
+                if progress_callback:
+                    progress_callback(file_size, file_size)
+                return DownloadResult(
+                    dest_path=actual_filepath,
+                    downloaded_bytes=file_size,
+                    mime_type=mime_type,
+                    provider_name=platform_name,
+                    filename=actual_filepath.name,
+                )
+        except Exception as exc:
+            logger.warning("CLI download fallback failed: %s", exc)
+        return None
+
     def can_handle(self, url: str) -> bool:
         """Check if URL belongs to a recognized media hosting platform."""
         try:
@@ -184,10 +314,15 @@ class MediaExtractorProvider(BaseProvider):
             if "age" in err_msg:
                 raise PermissionError("This media is age-restricted and requires an account to access.") from exc
             if "no video formats" in err_msg or "no formats" in err_msg:
+                cli_res = self._probe_via_cli(url, timeout)
+                if cli_res:
+                    return cli_res
                 raise ValueError(
-                    "No video formats found. This usually means the server's yt-dlp package is outdated, "
-                    "or the platform requires login cookies.\n"
-                    "👉 Run on your VPS: ~/BotGdrive/.venv/bin/pip install -U yt-dlp && sudo systemctl restart botgdrive"
+                    "No video formats found. Your server's yt-dlp is an older version (2024.10.22) "
+                    "because Python is version 3.8 (<3.9).\n\n"
+                    "💡 To upgrade yt-dlp on Ubuntu VPS, run:\n"
+                    "sudo wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp\n"
+                    "sudo systemctl restart botgdrive"
                 ) from exc
             raise ValueError(f"Media extraction failed: {exc}") from exc
         except Exception as exc:
@@ -296,9 +431,21 @@ class MediaExtractorProvider(BaseProvider):
             if "login" in err_msg or "sign in" in err_msg or "private" in err_msg:
                 raise PermissionError("This media requires private login credentials or permissions.") from exc
             if "no video formats" in err_msg or "no formats" in err_msg:
+                cli_res = self._download_via_cli(
+                    url=url,
+                    dest_path=dest_path,
+                    progress_callback=progress_callback,
+                    status_callback=status_callback,
+                    max_bytes=max_bytes,
+                    timeout=timeout,
+                )
+                if cli_res:
+                    return cli_res
                 raise ValueError(
-                    "No video formats found. This usually means the server's yt-dlp package is outdated, "
-                    "or the platform requires login cookies.\n"
-                    "👉 Run on your VPS: ~/BotGdrive/.venv/bin/pip install -U yt-dlp && sudo systemctl restart botgdrive"
+                    "No video formats found. Your server's yt-dlp is an older version (2024.10.22) "
+                    "because Python is version 3.8 (<3.9).\n\n"
+                    "💡 To upgrade yt-dlp on Ubuntu VPS, run:\n"
+                    "sudo wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp\n"
+                    "sudo systemctl restart botgdrive"
                 ) from exc
             raise IOError(f"Media extraction failed: {exc}") from exc

@@ -20,6 +20,16 @@ except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+# Backward compatibility polyfill for Python 3.8 (<3.9 lacks asyncio.to_thread)
+if not hasattr(asyncio, "to_thread"):
+    import functools
+
+    async def _compat_to_thread(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
+    asyncio.to_thread = _compat_to_thread
+
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     BotCommand,
