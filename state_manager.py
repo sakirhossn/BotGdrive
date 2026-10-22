@@ -57,10 +57,21 @@ class StateManager:
         self._save_prefs()
         logger.info("User %s set upload folder to '%s' (%s)", user_id, folder_name, folder_id)
 
-    def set_user_action(self, user_id: int, action: str, data: Optional[Dict[str, Any]] = None) -> None:
+    def set_user_action(self, user_id: int, action: str | Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> None:
         """Set active interactive step for user (e.g. 'awaiting_folder_name')."""
+        if isinstance(action, dict):
+            action_data = dict(action.get("data") or {})
+            if data:
+                action_data.update(data)
+            action_name = str(action.get("action", ""))
+            self._user_states[user_id] = {
+                "action": action_name,
+                "data": action_data,
+            }
+            return
+
         self._user_states[user_id] = {
-            "action": action,
+            "action": str(action),
             "data": data or {},
         }
 

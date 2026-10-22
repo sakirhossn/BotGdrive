@@ -9,11 +9,20 @@ import mimetypes
 from pathlib import Path
 import re
 import socket
+import ssl
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import certifi
+    _DEFAULT_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    _DEFAULT_SSL_CONTEXT = ssl.create_default_context()
+
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 import utils
 from providers.base import BaseProvider, DownloadResult, ProviderMetadata
@@ -30,10 +39,10 @@ class SSRFSecurityError(PermissionError):
 
 
 def is_ip_allowed(ip_str: str) -> bool:
-    """Check if an IP address is a safe public address (not loopback, private, or metadata)."""
+    """Check if an IP address is a safe public address (not loopback, private, CGNAT, or metadata)."""
     try:
         ip = ipaddress.ip_address(ip_str)
-        # Block private networks, loopback, link-local, multicast, reserved
+        # Block private networks, loopback, link-local, multicast, reserved, or CGNAT
         if (
             ip.is_private
             or ip.is_loopback
@@ -41,6 +50,7 @@ def is_ip_allowed(ip_str: str) -> bool:
             or ip.is_multicast
             or ip.is_reserved
             or ip.is_unspecified
+            or ip in _CGNAT_NETWORK
         ):
             return False
         # Specific cloud metadata addresses
@@ -106,8 +116,11 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def build_safe_opener() -> urllib.request.OpenerDirector:
-    """Construct a urllib opener with custom SSRF-safe redirect handling."""
-    return urllib.request.build_opener(SafeRedirectHandler())
+    """Construct a urllib opener with custom SSRF-safe redirect handling and resilient SSL context."""
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_DEFAULT_SSL_CONTEXT),
+        SafeRedirectHandler(),
+    )
 
 
 def extract_filename_from_headers(headers: http.client.HTTPMessage, fallback_url: str) -> str:

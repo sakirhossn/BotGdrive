@@ -247,7 +247,7 @@ async def help_command(client: Client, message: Message) -> None:
         "• /settoken — Hot-reload Google Drive OAuth token\n"
         "• /cancel — Cancel any active interactive prompt\n\n"
         "<b>Group & Search Commands:</b>\n"
-        "• /getfile &lt;keyword&gt; — Fetch file from Drive and post directly into the chat\n"
+        "• /getfile &lt;keyword&gt; [target] — Fetch file from Drive and post to this chat, group, or channel\n"
         "• /link or /links &lt;keyword&gt; — Search & post direct Google Drive file link\n"
         "• Reply with /upload or /save — Save any group file into Drive\n"
         "━━━━━━━━━━━━━━━━━━━━"
@@ -711,8 +711,72 @@ async def settoken_command(client: Client, message: Message) -> None:
 
 # ---------------- GROUP SHARING COMMANDS ---------------- #
 
+def _normalize_chat_target(token: str, require_strict_chat_id: bool = True) -> Optional[str | int]:
+    """Validate and normalize a target chat username or numeric ID.
+
+    If require_strict_chat_id is True (e.g. when no 'to' separator is used),
+    numeric IDs must start with '-' to avoid treating filename digits as chat targets.
+    """
+    token = token.strip()
+    if not token:
+        return None
+
+    # Telegram public username: @channel, @group, @user
+    if re.match(r"^@[a-zA-Z0-9_]{3,32}$", token):
+        return token
+
+    # Telegram negative supergroup/channel/group ID (-100... or -...)
+    if re.match(r"^-100\d{9,13}$|^-?\d{6,14}$", token):
+        if require_strict_chat_id and not token.startswith("-"):
+            return None
+        try:
+            return int(token)
+        except ValueError:
+            return None
+
+    return None
+
+
+def parse_getfile_query_and_target(raw_args: str) -> tuple[str, Optional[str | int]]:
+    """Parse search query and optional target chat/channel from /getfile arguments.
+
+    Supported patterns:
+      - /getfile <filename>
+      - /getfile <filename> to @target
+      - /getfile <filename> @target
+      - /getfile <filename> to -1001234567890
+      - /getfile <filename> -1001234567890
+      - /getfile <filename> to 123456789
+    """
+    raw = raw_args.strip()
+    if not raw:
+        return "", None
+
+    # 1. Explicit ' to ' separator (e.g. /getfile Document.pdf to @channel)
+    if " to " in raw.lower():
+        parts = re.split(r"\s+to\s+", raw, flags=re.IGNORECASE)
+        if len(parts) >= 2:
+            potential_target = parts[-1].strip()
+            potential_query = " to ".join(parts[:-1]).strip()
+            target = _normalize_chat_target(potential_target, require_strict_chat_id=False)
+            if target is not None and potential_query:
+                return potential_query, target
+
+    # 2. Trailing target without 'to' (e.g. /getfile Document.pdf @channel or -1001234567890)
+    parts = raw.split()
+    if len(parts) >= 2:
+        potential_target = parts[-1].strip()
+        target = _normalize_chat_target(potential_target, require_strict_chat_id=True)
+        if target is not None:
+            query = " ".join(parts[:-1]).strip()
+            if query:
+                return query, target
+
+    return raw, None
+
+
 async def getfile_command(client: Client, message: Message) -> None:
-    """Handle /getfile command in groups or private chat."""
+    """Handle /getfile command in groups, channels, or private chat with cross-chat delivery."""
     if not await is_authorized_user(client, message):
         await message.reply_text("❌ Only group Admins or authorized users can retrieve files from Drive.")
         return
@@ -720,13 +784,54 @@ async def getfile_command(client: Client, message: Message) -> None:
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await message.reply_text(
-            "💡 <b>Usage:</b> <code>/getfile &lt;filename or keyword&gt;</code>\n"
-            "Example: <code>/getfile Constitution</code>",
+            "💡 <b>Usage:</b> <code>/getfile &lt;filename or keyword&gt; [target_chat]</code>\n\n"
+            "<b>Examples:</b>\n"
+            "• <code>/getfile Constitution</code> <i>(deliver to this chat)</i>\n"
+            "• <code>/getfile Constitution @mychannel</code> <i>(deliver to channel/group)</i>\n"
+            "• <code>/getfile Report to -1001234567890</code> <i>(deliver to chat ID)</i>",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    query = parts[1].strip()
+    raw_args = parts[1].strip()
+    query, target = parse_getfile_query_and_target(raw_args)
+
+    if not query:
+        await message.reply_text("❌ Please specify a file name or keyword to search.")
+        return
+
+    user_id = message.from_user.id if message.from_user else 0
+
+    # Security: Delivering to external chats/channels requires Bot Administrator permissions
+    if target is not None and user_id not in config.ALLOWED_USER_IDS:
+        await message.reply_text(
+            "❌ <b>Access Denied:</b> Delivering files to external chats/channels is restricted to Bot Administrators.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    target_chat_id = message.chat.id
+    target_chat_name = message.chat.title or "this chat"
+
+    # Pre-flight check: verify the target chat is accessible before downloading
+    if target is not None:
+        status_check = await message.reply_text(
+            f"🔎 Checking target chat <code>{html.escape(str(target))}</code>...",
+            parse_mode=ParseMode.HTML,
+        )
+        try:
+            chat_obj = await client.get_chat(target)
+            target_chat_id = chat_obj.id
+            target_chat_name = chat_obj.title or chat_obj.first_name or str(target_chat_id)
+            await status_check.delete()
+        except Exception as exc:
+            await status_check.edit_text(
+                f"❌ <b>Target Chat Inaccessible:</b>\n\n<code>{html.escape(str(exc))}</code>\n\n"
+                f"💡 <i>Make sure the bot has been added to <code>{html.escape(str(target))}</code> with permissions to post messages.</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
     status_msg = await message.reply_text(f"🔍 Searching Drive for '<b>{html.escape(query)}</b>'...", parse_mode=ParseMode.HTML)
 
     try:
@@ -737,8 +842,20 @@ async def getfile_command(client: Client, message: Message) -> None:
 
         if len(matched) == 1:
             target_file = matched[0]
-            await _deliver_file_to_chat(client, message.chat.id, status_msg, target_file)
+            await _deliver_file_to_chat(
+                client,
+                target_chat_id,
+                status_msg,
+                target_file,
+                target_chat_name=target_chat_name,
+            )
         else:
+            state_manager.set_user_action(
+                user_id,
+                "getfile_select",
+                {"target_chat_id": target_chat_id, "target_chat_name": target_chat_name},
+            )
+
             buttons = []
             for f in matched[:6]:
                 f_size = utils.format_file_size(int(f.get("size", 0)))
@@ -746,8 +863,9 @@ async def getfile_command(client: Client, message: Message) -> None:
                 buttons.append([InlineKeyboardButton(label, callback_data=f"grp_send:{f['id']}")])
             buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="grp_cancel")])
 
+            target_info = f" to <b>{html.escape(target_chat_name)}</b>" if target_chat_id != message.chat.id else ""
             await status_msg.edit_text(
-                f"🔎 <b>Found {len(matched)} matching files.</b>\nSelect the file to post into this chat:",
+                f"🔎 <b>Found {len(matched)} matching files.</b>\nSelect the file to deliver{target_info}:",
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=ParseMode.HTML,
             )
@@ -799,7 +917,13 @@ async def upload_reply_command(client: Client, message: Message) -> None:
     await media_handler(client, message.reply_to_message)
 
 
-async def _deliver_file_to_chat(client: Client, chat_id: int, status_msg: Message, file_meta: dict[str, Any]) -> None:
+async def _deliver_file_to_chat(
+    client: Client,
+    chat_id: int | str,
+    status_msg: Message,
+    file_meta: dict[str, Any],
+    target_chat_name: Optional[str] = None,
+) -> None:
     """Download file from Google Drive and upload to Telegram chat (up to 2 GB)."""
     file_id = file_meta["id"]
     file_name = file_meta.get("name", "downloaded_file")
@@ -809,6 +933,9 @@ async def _deliver_file_to_chat(client: Client, chat_id: int, status_msg: Messag
     unique_id = uuid.uuid4().hex[:8]
     safe_name = utils.sanitize_filename(file_name)
     local_dest = config.DOWNLOADS_DIR / f"{unique_id}_{safe_name}"
+
+    is_external = (chat_id != status_msg.chat.id)
+    target_label = target_chat_name or str(chat_id)
 
     dl_tracker = utils.ProgressTracker(
         action_name="📥 Downloading from Drive",
@@ -834,8 +961,9 @@ async def _deliver_file_to_chat(client: Client, chat_id: int, status_msg: Messag
             asyncio.run_coroutine_threadsafe(_update(), loop)
 
     try:
+        dest_display = f" to <b>{html.escape(target_label)}</b>" if is_external else ""
         await status_msg.edit_text(
-            f"⏳ <b>Downloading from Google Drive:</b> <code>{html.escape(safe_name)}</code>\n"
+            f"⏳ <b>Downloading from Google Drive:</b> <code>{html.escape(safe_name)}</code>{dest_display}\n"
             f"📦 Size: {utils.format_file_size(file_size)}",
             parse_mode=ParseMode.HTML,
         )
@@ -848,7 +976,7 @@ async def _deliver_file_to_chat(client: Client, chat_id: int, status_msg: Messag
         )
 
         await status_msg.edit_text(
-            f"🚀 <b>Posting to Telegram:</b> <code>{html.escape(safe_name)}</code>\n"
+            f"🚀 <b>Posting to Telegram:</b> <code>{html.escape(safe_name)}</code>{dest_display}\n"
             f"📦 Size: {utils.format_file_size(file_size)}",
             parse_mode=ParseMode.HTML,
         )
@@ -862,7 +990,14 @@ async def _deliver_file_to_chat(client: Client, chat_id: int, status_msg: Messag
         else:
             await client.send_document(chat_id, document=str(downloaded_path), caption=caption, parse_mode=ParseMode.HTML)
 
-        await status_msg.edit_text(f"✅ <b>File Delivered:</b> <code>{html.escape(safe_name)}</code>", parse_mode=ParseMode.HTML)
+        if is_external:
+            await status_msg.edit_text(
+                f"✅ <b>File Delivered:</b> <code>{html.escape(safe_name)}</code>\n"
+                f"📍 Destination: <b>{html.escape(target_label)}</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await status_msg.edit_text(f"✅ <b>File Delivered:</b> <code>{html.escape(safe_name)}</code>", parse_mode=ParseMode.HTML)
 
     except Exception as exc:
         logger.exception("Failed to deliver file %s: %s", file_name, exc)
@@ -891,9 +1026,23 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
     if data.startswith("grp_send:"):
         file_id = data.split(":", 1)[1]
         await callback.answer("Fetching file from Drive...")
+        target_chat_id = callback.message.chat.id
+        target_chat_name = callback.message.chat.title or "this chat"
+        user_action = state_manager.get_user_action(user_id)
+        if user_action and user_action.get("action") == "getfile_select":
+            target_data = user_action.get("data", {})
+            target_chat_id = target_data.get("target_chat_id", target_chat_id)
+            target_chat_name = target_data.get("target_chat_name", target_chat_name)
+            state_manager.clear_user_action(user_id)
         try:
             meta = await asyncio.to_thread(drive_service.default_drive_service.get_metadata, file_id)
-            await _deliver_file_to_chat(client, callback.message.chat.id, callback.message, meta)
+            await _deliver_file_to_chat(
+                client,
+                target_chat_id,
+                callback.message,
+                meta,
+                target_chat_name=target_chat_name,
+            )
         except Exception as exc:
             await callback.message.edit_text(f"❌ Failed: {exc}")
         return
@@ -1653,7 +1802,7 @@ async def url_command(client: Client, message: Message) -> None:
     """Handle /url, /download, /dl <link> to download a file from a public URL to Google Drive."""
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        state_manager.set_user_action(message.from_user.id, {"action": "awaiting_url"})
+        state_manager.set_user_action(message.from_user.id, "awaiting_url")
         await message.reply_text(
             "🔗 <b>Download from Public URL:</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"

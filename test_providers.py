@@ -431,6 +431,120 @@ class TestMediaExtractorProvider(unittest.TestCase):
             self.assertEqual(meta.filename, "cool_video.mp4")
 
 
+class TestSecurityAndResilience(unittest.TestCase):
+    """Verify SSRF, path traversal, and filename sanitation defenses."""
+
+    def test_cgnat_blocked(self) -> None:
+        """Verify Carrier Grade NAT IP ranges (100.64.0.0/10) are blocked by SSRF checks."""
+        self.assertFalse(is_ip_allowed("100.64.0.1"))
+        self.assertFalse(is_ip_allowed("100.127.255.254"))
+
+    def test_sanitize_filename_traversal(self) -> None:
+        """Verify directory traversal patterns cannot escape destination directory."""
+        from utils import sanitize_filename
+        self.assertEqual(sanitize_filename("../../etc/passwd"), "passwd")
+        self.assertEqual(sanitize_filename("..\\..\\windows\\system32\\cmd.exe"), "cmd.exe")
+
+    def test_sanitize_filename_null_bytes_and_controls(self) -> None:
+        """Verify null bytes and control characters are stripped."""
+        from utils import sanitize_filename
+        self.assertEqual(sanitize_filename("bad\x00file\x1fname.mp4"), "badfilename.mp4")
+
+
+class TestConversationalAndCrossChat(unittest.TestCase):
+    """Verify conversational /url states and /getfile target chat parsing."""
+
+    def test_state_manager_defensive_unwrapping(self) -> None:
+        """Verify StateManager normalizes dict-passed actions gracefully."""
+        from state_manager import StateManager
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            tf_path = Path(tf.name)
+        try:
+            sm = StateManager(prefs_path=tf_path)
+            # Pass dictionary accidentally
+            sm.set_user_action(999, {"action": "awaiting_url", "data": {"key": "val"}})
+            state = sm.get_user_action(999)
+            self.assertIsNotNone(state)
+            self.assertEqual(state["action"], "awaiting_url")
+            self.assertEqual(state["data"], {"key": "val"})
+
+            # Pass normal string
+            sm.set_user_action(999, "awaiting_folder_name", {"parent": "root"})
+            state = sm.get_user_action(999)
+            self.assertEqual(state["action"], "awaiting_folder_name")
+            self.assertEqual(state["data"], {"parent": "root"})
+        finally:
+            tf_path.unlink(missing_ok=True)
+
+    def test_parse_getfile_query_and_target(self) -> None:
+        """Verify query and target extraction for /getfile command."""
+        from handlers import parse_getfile_query_and_target
+
+        # 1. Plain search query
+        q, t = parse_getfile_query_and_target("Constitution of India")
+        self.assertEqual(q, "Constitution of India")
+        self.assertIsNone(t)
+
+        # 2. Number in filename should NOT be mistaken for target
+        q, t = parse_getfile_query_and_target("Annual Report 2024")
+        self.assertEqual(q, "Annual Report 2024")
+        self.assertIsNone(t)
+
+        # 3. Explicit 'to @channel'
+        q, t = parse_getfile_query_and_target("Physics Lecture 01 to @my_channel")
+        self.assertEqual(q, "Physics Lecture 01")
+        self.assertEqual(t, "@my_channel")
+
+        # 4. Trailing @channel without 'to'
+        q, t = parse_getfile_query_and_target("Physics Lecture 01 @my_channel")
+        self.assertEqual(q, "Physics Lecture 01")
+        self.assertEqual(t, "@my_channel")
+
+        # 5. Explicit 'to -1001234567890' (supergroup/channel ID)
+        q, t = parse_getfile_query_and_target("Important Doc to -1001234567890")
+        self.assertEqual(q, "Important Doc")
+        self.assertEqual(t, -1001234567890)
+
+        # 6. Trailing negative group ID without 'to'
+        q, t = parse_getfile_query_and_target("Important Doc -1001234567890")
+        self.assertEqual(q, "Important Doc")
+        self.assertEqual(t, -1001234567890)
+
+        # 7. Explicit 'to 123456789' (positive chat ID)
+        q, t = parse_getfile_query_and_target("Photo to 123456789")
+        self.assertEqual(q, "Photo")
+        self.assertEqual(t, 123456789)
+
+
+class TestDriveServiceThreadIsolation(unittest.TestCase):
+    """Verify DriveService maintains thread-isolated service instances."""
+
+    def test_thread_local_isolation(self) -> None:
+        import threading
+        from drive_service import DriveService
+
+        ds = DriveService()
+        results = {}
+        barrier = threading.Barrier(2)
+
+        def worker(thread_name: str):
+            with patch.object(ds, "_get_credentials", return_value=MagicMock()):
+                with patch("drive_service.build", side_effect=lambda *a, **kw: object()):
+                    barrier.wait()
+                    results[thread_name] = ds.service
+
+        t1 = threading.Thread(target=worker, args=("t1",))
+        t2 = threading.Thread(target=worker, args=("t2",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertIn("t1", results)
+        self.assertIn("t2", results)
+        self.assertIsNot(results["t1"], results["t2"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

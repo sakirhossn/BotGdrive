@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from pathlib import Path
 import socket
+import ssl
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -34,7 +37,7 @@ _parent_cache: Dict[str, Optional[str]] = {}
 
 
 class DriveService:
-    """Encapsulates Google Drive v3 API client and operations."""
+    """Encapsulates Google Drive v3 API client and operations with thread-isolated transports."""
 
     def __init__(
         self,
@@ -45,77 +48,104 @@ class DriveService:
         self.credentials_file = credentials_file
         self.token_file = token_file
         self.root_folder_id = root_folder_id
-        self._service: Optional[Resource] = None
+        self._local = threading.local()
+        self._creds_lock = threading.Lock()
+        self._creds: Optional[Credentials] = None
 
-    def authenticate(self) -> Resource:
-        """Authenticate with Google OAuth 2.0 and build the Drive resource."""
-        config.restore_cloud_credentials()
-        creds: Optional[Credentials] = None
+    @property
+    def _service(self) -> Optional[Resource]:
+        """Backward-compatible accessor for thread-local service."""
+        return getattr(self._local, "service", None)
 
-        if self.token_file.exists():
-            try:
-                creds = Credentials.from_authorized_user_file(str(self.token_file), SCOPES)
-            except Exception as exc:
-                logger.warning("Failed to load existing token file: %s", exc)
-                creds = None
+    @_service.setter
+    def _service(self, val: Optional[Resource]) -> None:
+        self._local.service = val
 
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                logger.info("Refreshing expired Google OAuth access token...")
+    def _get_credentials(self) -> Credentials:
+        """Thread-safe retrieval and refresh of Google OAuth 2.0 credentials."""
+        with self._creds_lock:
+            if self._creds and self._creds.valid:
+                return self._creds
+
+            config.restore_cloud_credentials()
+            creds: Optional[Credentials] = self._creds
+
+            if creds is None and self.token_file.exists():
                 try:
-                    creds.refresh(Request())
+                    creds = Credentials.from_authorized_user_file(str(self.token_file), SCOPES)
                 except Exception as exc:
-                    logger.warning("Token refresh failed: %s. Initiating full OAuth flow.", exc)
+                    logger.warning("Failed to load existing token file: %s", exc)
                     creds = None
 
-            if not creds:
-                if not self.credentials_file.exists():
-                    raise FileNotFoundError(
-                        f"OAuth client secrets file not found at '{self.credentials_file}'. "
-                        "Please provide credentials.json or set CREDENTIALS_JSON_CONTENT in environment."
-                    )
-                logger.info("Initiating Google OAuth flow...")
-                flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_file), SCOPES)
-                try:
-                    creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
-                except Exception as oauth_err:
-                    err_msg = str(oauth_err)
-                    if "browser" in err_msg.lower() or os.getenv("RENDER"):
-                        raise RuntimeError(
-                            "Google OAuth token is expired or revoked ('invalid_grant'), and this server cannot open a browser (headless cloud environment).\n"
-                            "👉 FIX: Re-authenticate locally on your PC by running 'python generate_token.py', then paste the new token into Render's 'TOKEN_JSON_CONTENT' environment variable."
-                        ) from oauth_err
-                    raise
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    logger.info("Refreshing expired Google OAuth access token...")
+                    try:
+                        creds.refresh(Request())
+                    except Exception as exc:
+                        logger.warning("Token refresh failed: %s. Initiating full OAuth flow.", exc)
+                        creds = None
 
-            try:
-                with open(self.token_file, "w", encoding="utf-8") as token_out:
-                    token_out.write(creds.to_json())
-                logger.info("Saved Google OAuth token to '%s'", self.token_file)
-            except OSError as exc:
-                logger.error("Could not write token file: %s", exc)
+                if not creds:
+                    if not self.credentials_file.exists():
+                        raise FileNotFoundError(
+                            f"OAuth client secrets file not found at '{self.credentials_file}'. "
+                            "Please provide credentials.json or set CREDENTIALS_JSON_CONTENT in environment."
+                        )
+                    logger.info("Initiating Google OAuth flow...")
+                    flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_file), SCOPES)
+                    try:
+                        creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
+                    except Exception as oauth_err:
+                        err_msg = str(oauth_err)
+                        if "browser" in err_msg.lower() or os.getenv("RENDER"):
+                            raise RuntimeError(
+                                "Google OAuth token is expired or revoked ('invalid_grant'), and this server cannot open a browser (headless cloud environment).\n"
+                                "👉 FIX: Re-authenticate locally on your PC by running 'python generate_token.py', then paste the new token into Render's 'TOKEN_JSON_CONTENT' environment variable."
+                            ) from oauth_err
+                        raise
 
-        self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        return self._service
+                    try:
+                        with open(self.token_file, "w", encoding="utf-8") as token_out:
+                            token_out.write(creds.to_json())
+                        logger.info("Saved Google OAuth token to '%s'", self.token_file)
+                    except OSError as exc:
+                        logger.error("Could not write token file: %s", exc)
+
+            self._creds = creds
+            return self._creds
+
+    def authenticate(self) -> Resource:
+        """Authenticate with Google OAuth 2.0 and build the Drive resource for the current thread."""
+        creds = self._get_credentials()
+        self._local.service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return self._local.service
 
     @property
     def service(self) -> Resource:
-        """Get or initialize the Google Drive API service resource."""
-        if self._service is None:
-            self.authenticate()
-        return self._service
+        """Get or initialize thread-local Google Drive API service resource."""
+        svc = getattr(self._local, "service", None)
+        if svc is None:
+            creds = self._get_credentials()
+            svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+            self._local.service = svc
+        return svc
 
     def _reset_http_connections(self) -> None:
-        """Clear cached httplib2 connections to prevent dead socket reuse after timeout."""
+        """Clear cached httplib2 connections on current thread to prevent dead/corrupted socket reuse."""
         try:
-            inner = getattr(self.service._http, "http", self.service._http)
-            if hasattr(inner, "connections"):
-                for conn in list(inner.connections.values()):
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                inner.connections.clear()
-                logger.debug("Cleared httplib2 connection pool for clean retry.")
+            svc = getattr(self._local, "service", None)
+            if svc is not None:
+                inner = getattr(svc._http, "http", svc._http)
+                if hasattr(inner, "connections"):
+                    for conn in list(inner.connections.values()):
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                    inner.connections.clear()
+            self._local.service = None
+            logger.debug("Cleared thread-local httplib2 connection pool for clean retry.")
         except Exception as exc:
             logger.debug("Could not reset HTTP connections: %s", exc)
 
@@ -224,16 +254,33 @@ class DriveService:
         query = f"name contains '{safe_keyword}' and mimeType != 'application/vnd.google-apps.folder' and trashed = false"
         fields = "files(id, name, mimeType, size, modifiedTime, createdTime, parents, webViewLink, trashed)"
 
-        response = self.service.files().list(
-            q=query,
-            spaces="drive",
-            fields=fields,
-            pageSize=50,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
+        response = None
+        for attempt in range(2):
+            try:
+                response = self.service.files().list(
+                    q=query,
+                    spaces="drive",
+                    fields=fields,
+                    pageSize=50,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                ).execute()
+                break
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                is_conn_err = (
+                    isinstance(exc, (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError))
+                    or "ssl" in exc_str
+                    or "nonetype" in exc_str
+                    or "timed out" in exc_str
+                )
+                if is_conn_err and attempt == 0:
+                    logger.warning("Drive search_files network/SSL error: %s. Resetting connection and retrying...", exc)
+                    self._reset_http_connections()
+                    continue
+                raise
 
-        raw_files = response.get("files", [])
+        raw_files = response.get("files", []) if response else []
         matched: List[Dict[str, Any]] = []
         for f in raw_files:
             if self.is_within_managed_root(f["id"]):
@@ -408,15 +455,23 @@ class DriveService:
             try:
                 status, response = request.next_chunk(num_retries=2)
                 retries = 0
-            except (socket.timeout, TimeoutError, OSError, Exception) as exc:
-                if "timed out" in str(exc).lower() or isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                is_conn_error = (
+                    isinstance(exc, (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError))
+                    or "timed out" in exc_str
+                    or "record layer failure" in exc_str
+                    or "called a function you should not call" in exc_str
+                    or ("nonetype" in exc_str and "read" in exc_str)
+                )
+                if is_conn_error:
                     self._reset_http_connections()
                     retries += 1
                     if retries > max_retries:
                         logger.error("Exceeded max retries (%d) during resumable upload: %s", max_retries, exc)
                         raise
                     wait_time = retries * 2
-                    logger.warning("Upload chunk timeout (%s). Resuming with fresh socket in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
+                    logger.warning("Upload chunk timeout/SSL error (%s). Resuming with fresh socket in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
                     time.sleep(wait_time)
                     continue
                 raise
@@ -446,8 +501,8 @@ class DriveService:
         dest = Path(destination_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
         with open(dest, "wb") as fh:
+            request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
             downloader = MediaIoBaseDownload(fh, request, chunksize=5 * 1024 * 1024)
             done = False
             retries = 0
@@ -456,16 +511,26 @@ class DriveService:
                 try:
                     status, done = downloader.next_chunk(num_retries=2)
                     retries = 0
-                except (socket.timeout, TimeoutError, OSError, Exception) as exc:
-                    if "timed out" in str(exc).lower() or isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, OSError)):
+                except Exception as exc:
+                    exc_str = str(exc).lower()
+                    is_conn_error = (
+                        isinstance(exc, (ssl.SSLError, socket.timeout, TimeoutError, ConnectionError, OSError))
+                        or "timed out" in exc_str
+                        or "record layer failure" in exc_str
+                        or "called a function you should not call" in exc_str
+                        or ("nonetype" in exc_str and "read" in exc_str)
+                    )
+                    if is_conn_error:
                         self._reset_http_connections()
                         retries += 1
                         if retries > max_retries:
                             logger.error("Exceeded max retries (%d) during Drive download: %s", max_retries, exc)
                             raise
                         wait_time = retries * 2
-                        logger.warning("Download chunk timeout (%s). Retrying with fresh socket in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
+                        logger.warning("Drive download network/SSL error (%s). Rebuilding connection in %ds (attempt %d/%d)...", exc, wait_time, retries, max_retries)
                         time.sleep(wait_time)
+                        # Re-bind request to fresh thread connection while keeping byte progress intact
+                        downloader._request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
                         continue
                     raise
                 if status and progress_callback and total_size > 0:

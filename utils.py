@@ -57,11 +57,16 @@ def truncate_button_text(text: str, max_len: int = 30) -> str:
 
 
 def sanitize_filename(filename: Optional[str], default_prefix: str = "file") -> str:
-    """Sanitize filename to prevent invalid filesystem characters or traversal."""
+    """Sanitize filename to prevent invalid filesystem characters, control bytes, or traversal."""
     if not filename:
         return f"{default_prefix}_{int(time.time())}"
 
-    clean = re.sub(r'[\\/*?:"<>|]', "_", filename)
+    # Strip null bytes and ASCII control characters (\x00-\x1f, \x7f-\x9f)
+    clean = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
+    # Normalize path separators and extract basename to prevent directory traversal
+    clean = clean.replace("\\", "/")
+    clean = Path(clean).name
+    clean = re.sub(r'[\\/*?:"<>|]', "_", clean)
     clean = clean.strip(". ")
     return clean or f"{default_prefix}_{int(time.time())}"
 
