@@ -39,10 +39,10 @@ DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def restore_cloud_credentials() -> None:
+def restore_cloud_credentials(force: bool = False) -> None:
     """Auto-restore credentials from environment variables for Render/cloud deployment."""
     creds_content = os.getenv("CREDENTIALS_JSON_CONTENT", "").strip()
-    if creds_content:
+    if creds_content and (force or not CREDENTIALS_FILE.exists()):
         try:
             CREDENTIALS_FILE.write_text(creds_content, encoding="utf-8")
             logging.getLogger(__name__).info("Restored credentials.json from CREDENTIALS_JSON_CONTENT.")
@@ -50,7 +50,7 @@ def restore_cloud_credentials() -> None:
             logging.getLogger(__name__).error("Failed to write credentials.json: %s", exc)
 
     token_content = os.getenv("TOKEN_JSON_CONTENT", "").strip()
-    if token_content:
+    if token_content and (force or not TOKEN_FILE.exists()):
         try:
             TOKEN_FILE.write_text(token_content, encoding="utf-8")
             logging.getLogger(__name__).info("Restored token.json from TOKEN_JSON_CONTENT.")

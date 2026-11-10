@@ -545,6 +545,138 @@ class TestDriveServiceThreadIsolation(unittest.TestCase):
         self.assertIsNot(results["t1"], results["t2"])
 
 
+class TestFolderNavigationAndCreation(unittest.IsolatedAsyncioTestCase):
+    """Verify Change Folder includes Create New Folder and Return to Folder Options."""
+
+    def _collect_callbacks(self, markup) -> list[tuple[str, str]]:
+        return [
+            (btn.text, btn.callback_data)
+            for row in markup.inline_keyboard
+            for btn in row
+            if getattr(btn, "callback_data", None)
+        ]
+
+    def test_select_mode_browser_has_create_and_return_options(self) -> None:
+        import config
+        from handlers import build_folder_browser_keyboard
+
+        root_id = "root_id_1234567890123456789012345"
+        sub_id = "sub_id_12345678901234567890123456"
+
+        # Root in select mode
+        with patch.object(config, "DRIVE_FOLDER_ID", root_id):
+            _, root_markup = build_folder_browser_keyboard(
+                folder_id=root_id,
+                parent_id=None,
+                folders=[{"id": sub_id, "name": "Movies"}],
+                files=[],
+                is_select_mode=True,
+                folder_name="Root",
+            )
+            root_cbs = self._collect_callbacks(root_markup)
+            cb_values = [cb for _, cb in root_cbs]
+            labels = [lbl for lbl, _ in root_cbs]
+
+            self.assertIn(f"act:mkdir:{root_id}:1", cb_values)
+            self.assertIn("act:folder_options", cb_values)
+            self.assertIn("menu:main", cb_values)
+            self.assertNotIn("nav:select_mode:root", cb_values)  # Already at root
+            self.assertNotIn("⬆️ Up", labels)
+            for _, cb in root_cbs:
+                self.assertLessEqual(len(cb.encode("utf-8")), 64)
+
+            # Subfolder in select mode
+            _, sub_markup = build_folder_browser_keyboard(
+                folder_id=sub_id,
+                parent_id=root_id,
+                folders=[],
+                files=[],
+                is_select_mode=True,
+                folder_name="Movies",
+                parent_name="Root",
+            )
+            sub_cbs = self._collect_callbacks(sub_markup)
+            sub_cb_values = [cb for _, cb in sub_cbs]
+            sub_labels = [lbl for lbl, _ in sub_cbs]
+
+            self.assertIn(f"act:mkdir:{sub_id}:1", sub_cb_values)
+            self.assertIn(f"nav:sel_mode:{root_id}", sub_cb_values)
+            self.assertIn("nav:select_mode:root", sub_cb_values)
+            self.assertIn("act:folder_options", sub_cb_values)
+            self.assertNotIn("⬆️ Up", sub_labels)  # Avoid duplicate Up button
+            for _, cb in sub_cbs:
+                self.assertLessEqual(len(cb.encode("utf-8")), 64)
+
+    def test_folder_options_view_and_mkdir_prompt(self) -> None:
+        from handlers import _build_mkdir_prompt, build_folder_options_view
+
+        with patch("handlers.state_manager.get_upload_folder", return_value=("folder_abc", "Movies")):
+            text, markup = build_folder_options_view(12345)
+            self.assertIn("Movies", text)
+            cbs = [cb for _, cb in self._collect_callbacks(markup)]
+            self.assertIn("nav:select_mode:root", cbs)
+            self.assertIn("nav:folder_abc", cbs)
+            self.assertIn("act:folders", cbs)
+            self.assertIn("act:mkdir:folder_abc:0", cbs)
+            self.assertIn("menu:main", cbs)
+
+        prompt_text, prompt_markup = _build_mkdir_prompt("folder_abc", "Movies", from_select_mode=True)
+        self.assertIn("Movies", prompt_text)
+        prompt_cbs = [cb for _, cb in self._collect_callbacks(prompt_markup)]
+        self.assertIn("nav:sel_mode:folder_abc", prompt_cbs)
+        self.assertIn("act:folder_options", prompt_cbs)
+        self.assertIn("menu:main", prompt_cbs)
+
+    async def test_create_folder_and_stale_state_cleared_on_return(self) -> None:
+        import config
+        from handlers import _create_folder_and_reply, callback_handler
+        from state_manager import state_manager
+
+        wait_msg = MagicMock()
+        edited = {}
+
+        async def _edit_text(text, reply_markup=None, parse_mode=None):
+            edited["text"] = text
+            edited["markup"] = reply_markup
+
+        wait_msg.edit_text = _edit_text
+
+        msg = MagicMock()
+        async def _reply_text(*args, **kwargs):
+            return wait_msg
+        msg.reply_text = _reply_text
+
+        with patch("handlers.drive_service.default_drive_service.create_folder", return_value={"id": "new_123", "webViewLink": "https://drive.google.com/new"}), \
+             patch("handlers.drive_service.default_drive_service.build_drive_link", return_value="https://drive.google.com/new"):
+            await _create_folder_and_reply(msg, "Action", "parent_456", "Movies", from_select_mode=True)
+
+        cbs = [cb for _, cb in self._collect_callbacks(edited["markup"])]
+        self.assertIn("sel:new_123", cbs)
+        self.assertIn("nav:sel_mode:new_123", cbs)
+        self.assertIn("nav:sel_mode:parent_456", cbs)
+        self.assertIn("act:folder_options", cbs)
+        self.assertIn("menu:main", cbs)
+
+        # Verify returning via act:folder_options clears awaiting_folder_name
+        uid = 987654321
+        state_manager.set_user_action(uid, "awaiting_folder_name", {"parent_id": "parent_456"})
+        cb_msg = MagicMock()
+        cb_msg.edit_text = _edit_text
+        cb = MagicMock()
+        cb.data = "act:folder_options"
+        cb.from_user.id = uid
+        cb.message = cb_msg
+
+        async def _answer(*args, **kwargs):
+            return None
+        cb.answer = _answer
+
+        with patch.object(config, "ALLOWED_USER_IDS", {uid}):
+            await callback_handler(MagicMock(), cb)
+
+        self.assertIsNone(state_manager.get_user_action(uid))
+
+
 if __name__ == "__main__":
     unittest.main()
 
