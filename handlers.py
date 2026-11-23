@@ -1105,6 +1105,42 @@ async def _deliver_file_to_chat(
             local_dest.unlink(missing_ok=True)
 
 
+def _build_url_confirmation_card(task_id: str, task: Dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the URL download confirmation card and inline keyboard with rename support."""
+    size_bytes = task.get("size_bytes", 0)
+    size_text = utils.format_file_size(size_bytes) if size_bytes > 0 else "Dynamic / Stream"
+    provider_disp = task.get("provider") or "Direct HTTP"
+    filename = task.get("filename", "download")
+    target_name = task.get("target_name", "Root")
+    host = task.get("host", "Unknown")
+
+    buttons = [
+        [InlineKeyboardButton("📥 Download & Upload to Drive", callback_data=f"act:url_dl:{task_id}")],
+        [
+            InlineKeyboardButton("✏️ Rename File", callback_data=f"act:url_rename:{task_id}"),
+            InlineKeyboardButton("📂 Choose Drive Folder", callback_data="nav:select_mode:root"),
+        ],
+        [
+            InlineKeyboardButton("🔎 Check Link", callback_data=f"act:url_check:{task_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"act:url_cancel:{task_id}"),
+        ],
+    ]
+
+    card = (
+        "🔗 <b>Link received</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 <b>Title/File:</b> <code>{html.escape(filename)}</code>\n"
+        f"📦 <b>Size:</b> {size_text}\n"
+        f"🌐 <b>Source:</b> <code>{html.escape(host)}</code>\n"
+        f"📁 <b>Target Folder:</b> <code>{html.escape(target_name)}</code>\n"
+        f"⚡ <b>Provider:</b> {html.escape(provider_disp)}\n"
+        f"📊 <b>Status:</b> Ready for Download\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Press Download to start, or Rename File to update the file name before uploading.</i>"
+    )
+    return card, InlineKeyboardMarkup(buttons)
+
+
 # ---------------- CALLBACK QUERY HANDLER ---------------- #
 
 async def callback_handler(client: Client, callback: CallbackQuery) -> None:
@@ -1601,6 +1637,38 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         await callback.answer("Canceled.")
         return
 
+    # URL Downloader Rename File (update file name before download & upload)
+    if data.startswith("act:url_rename:"):
+        task_id = data.split(":", 2)[2]
+        task = url_service.get_pending_task(task_id)
+        if not task:
+            await callback.answer("❌ This link request has expired. Please re-send the link.", show_alert=True)
+            return
+
+        current_name = task.get("filename", "")
+        state_manager.set_user_action(
+            user_id,
+            "awaiting_url_rename",
+            {
+                "task_id": task_id,
+                "message_id": callback.message.id,
+                "chat_id": callback.message.chat.id,
+                "old_filename": current_name,
+            },
+        )
+        await callback.answer()
+        await callback.message.reply_text(
+            "✏️ <b>Rename File:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>Current Name:</b> <code>{html.escape(current_name)}</code>\n\n"
+            "Please send the new file name in your next message.\n"
+            "<i>(You can include or omit the extension; the original extension is retained if omitted)</i>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Send /cancel to keep the current name.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     # URL Downloader Check Link
     if data.startswith("act:url_check:"):
         task_id = data.split(":", 2)[2]
@@ -1611,15 +1679,21 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
         await callback.answer("🔎 Checking link availability...")
         try:
             meta = await asyncio.to_thread(url_service.probe_url, task["url"])
+            if not task.get("custom_filename"):
+                task["filename"] = meta["filename"]
             task.update({
-                "filename": meta["filename"],
                 "size_bytes": meta["size_bytes"],
                 "mime_type": meta["mime_type"],
                 "provider": meta.get("provider_name") or meta.get("provider"),
             })
             url_service.store_pending_task(task_id, task)
+            card, markup = _build_url_confirmation_card(task_id, task)
+            try:
+                await callback.message.edit_text(card, reply_markup=markup, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
             size_disp = utils.format_file_size(meta["size_bytes"]) if meta["size_bytes"] > 0 else "Dynamic Stream"
-            await callback.answer(f"✅ Verified: {meta['filename']}\nSize: {size_disp}", show_alert=True)
+            await callback.answer(f"✅ Verified: {task['filename']}\nSize: {size_disp}", show_alert=True)
         except Exception as exc:
             await callback.answer(f"⚠️ Error checking link: {exc}", show_alert=True)
         return
@@ -1873,7 +1947,7 @@ async def callback_handler(client: Client, callback: CallbackQuery) -> None:
 
 # ---------------- TEXT PROMPT & URL HANDLER ---------------- #
 
-async def handle_incoming_url(client: Client, message: Message, url: str) -> None:
+async def handle_incoming_url(client: Client, message: Message, url: str, custom_filename: Optional[str] = None) -> None:
     """Inspect an incoming public URL and present the confirmation card."""
     wait_msg = await message.reply_text("🔍 <b>Inspecting link...</b>", parse_mode=ParseMode.HTML)
     try:
@@ -1890,45 +1964,36 @@ async def handle_incoming_url(client: Client, message: Message, url: str) -> Non
             )
             return
 
+        final_filename = meta["filename"]
+        has_custom = False
+        if custom_filename:
+            clean_custom = utils.sanitize_filename(custom_filename)
+            old_ext = Path(meta["filename"]).suffix
+            new_ext = Path(clean_custom).suffix
+            if old_ext and not new_ext:
+                clean_custom = f"{clean_custom}{old_ext}"
+            final_filename = clean_custom
+            has_custom = True
+
         target_id, target_name = state_manager.get_upload_folder(message.from_user.id)
         task_id = uuid.uuid4().hex[:8]
-        url_service.store_pending_task(task_id, {
+        task_data = {
             "url": meta["url"],
-            "filename": meta["filename"],
+            "filename": final_filename,
+            "original_filename": meta["filename"],
             "size_bytes": meta["size_bytes"],
             "mime_type": meta["mime_type"],
             "host": meta["host"],
-            "provider": meta["provider"],
+            "provider": meta.get("provider_name") or meta.get("provider"),
             "target_id": target_id,
             "target_name": target_name,
             "user_id": message.from_user.id,
-        })
+            "custom_filename": has_custom,
+        }
+        url_service.store_pending_task(task_id, task_data)
 
-        buttons = [
-            [InlineKeyboardButton("📥 Download & Upload to Drive", callback_data=f"act:url_dl:{task_id}")],
-            [
-                InlineKeyboardButton("📂 Choose Drive Folder", callback_data="nav:select_mode:root"),
-                InlineKeyboardButton("🔎 Check Link", callback_data=f"act:url_check:{task_id}"),
-            ],
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"act:url_cancel:{task_id}")],
-        ]
-
-        size_text = utils.format_file_size(meta["size_bytes"]) if meta["size_bytes"] > 0 else "Dynamic / Stream"
-        provider_disp = meta.get("provider_name") or meta.get("provider") or "Direct HTTP"
-
-        card = (
-            "🔗 <b>Link received</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📄 <b>Title/File:</b> <code>{html.escape(meta['filename'])}</code>\n"
-            f"📦 <b>Size:</b> {size_text}\n"
-            f"🌐 <b>Source:</b> <code>{html.escape(meta['host'])}</code>\n"
-            f"📁 <b>Target Folder:</b> <code>{html.escape(target_name)}</code>\n"
-            f"⚡ <b>Provider:</b> {html.escape(provider_disp)}\n"
-            f"📊 <b>Status:</b> Ready for Download\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 <i>Press Download to fetch and store directly in Google Drive.</i>"
-        )
-        await wait_msg.edit_text(card, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+        card, markup = _build_url_confirmation_card(task_id, task_data)
+        await wait_msg.edit_text(card, reply_markup=markup, parse_mode=ParseMode.HTML)
 
     except url_service.SSRFSecurityError as sec_err:
         logger.warning("SSRF blocked for user %s: %s", message.from_user.id, sec_err)
@@ -1940,8 +2005,8 @@ async def handle_incoming_url(client: Client, message: Message, url: str) -> Non
 
 @restricted
 async def url_command(client: Client, message: Message) -> None:
-    """Handle /url, /download, /dl <link> to download a file from a public URL to Google Drive."""
-    parts = message.text.split(maxsplit=1)
+    """Handle /url, /download, /dl <link> [new_name] to download a file from a public URL to Google Drive."""
+    parts = message.text.split(maxsplit=2)
     if len(parts) < 2 or not parts[1].strip():
         state_manager.set_user_action(message.from_user.id, "awaiting_url")
         await message.reply_text(
@@ -1949,26 +2014,30 @@ async def url_command(client: Client, message: Message) -> None:
             "━━━━━━━━━━━━━━━━━━━━\n"
             "Please paste or send the direct download link into this chat.\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 <i>Tip: You can also use:</i> <code>/url &lt;link&gt;</code> or <code>/download &lt;link&gt;</code>\n"
+            "💡 <i>Tip: You can also use:</i> <code>/url &lt;link&gt; [optional_file_name]</code>\n"
             "<i>Send /cancel to abort.</i>",
             parse_mode=ParseMode.HTML,
         )
         return
 
     url = parts[1].strip()
-    await handle_incoming_url(client, message, url)
+    custom_filename = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+    await handle_incoming_url(client, message, url, custom_filename=custom_filename)
 
 
 @restricted
 async def text_handler(client: Client, message: Message) -> None:
-    """Handle conversational text input (e.g. folder creation name, search query, or pasted URLs)."""
+    """Handle conversational text input (e.g. folder creation name, search query, pasted URLs, or rename)."""
     user_action = state_manager.get_user_action(message.from_user.id)
     if not user_action:
         # Check if user sent/pasted an HTTP/HTTPS link
         text = (message.text or "").strip()
         url_match = re.search(r"https?://[^\s]+", text)
         if url_match:
-            await handle_incoming_url(client, message, url_match.group(0))
+            matched_url = url_match.group(0)
+            remainder = text.replace(matched_url, "").strip()
+            custom_filename = remainder if remainder else None
+            await handle_incoming_url(client, message, matched_url, custom_filename=custom_filename)
             return
         return
 
@@ -1979,9 +2048,68 @@ async def text_handler(client: Client, message: Message) -> None:
         text = (message.text or "").strip()
         url_match = re.search(r"https?://[^\s]+", text)
         if url_match:
-            await handle_incoming_url(client, message, url_match.group(0))
+            matched_url = url_match.group(0)
+            remainder = text.replace(matched_url, "").strip()
+            custom_filename = remainder if remainder else None
+            await handle_incoming_url(client, message, matched_url, custom_filename=custom_filename)
         else:
             await message.reply_text("❌ No valid HTTP/HTTPS link detected. Please send a valid link or send /cancel.")
+        return
+
+    if action == "awaiting_url_rename":
+        action_data = user_action.get("data") or {}
+        task_id = action_data.get("task_id")
+        orig_msg_id = action_data.get("message_id")
+        orig_chat_id = action_data.get("chat_id")
+        old_filename = action_data.get("old_filename", "")
+        state_manager.clear_user_action(message.from_user.id)
+
+        new_name_raw = (message.text or "").strip()
+        if not new_name_raw:
+            await message.reply_text("❌ File name cannot be empty. Send /cancel to keep original name.")
+            return
+
+        task = url_service.get_pending_task(task_id)
+        if not task:
+            await message.reply_text("❌ The pending link task has expired. Please send the link again.")
+            return
+
+        safe_new_name = utils.sanitize_filename(new_name_raw)
+        old_ext = Path(old_filename).suffix
+        new_ext = Path(safe_new_name).suffix
+        if old_ext and not new_ext:
+            safe_new_name = f"{safe_new_name}{old_ext}"
+
+        task["filename"] = safe_new_name
+        task["custom_filename"] = True
+        url_service.store_pending_task(task_id, task)
+
+        # Update the original confirmation card if possible
+        card, markup = _build_url_confirmation_card(task_id, task)
+        if orig_chat_id and orig_msg_id:
+            try:
+                await client.edit_message_text(
+                    chat_id=orig_chat_id,
+                    message_id=orig_msg_id,
+                    text=card,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as edit_err:
+                logger.debug("Could not edit original URL card: %s", edit_err)
+
+        # Reply with confirmation and active action buttons
+        await message.reply_text(
+            "✅ <b>File Name Updated!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 <b>New Name:</b> <code>{html.escape(safe_new_name)}</code>\n"
+            f"📦 <b>Size:</b> {utils.format_file_size(task.get('size_bytes')) if task.get('size_bytes', 0) > 0 else 'Dynamic / Stream'}\n"
+            f"📁 <b>Target Folder:</b> <code>{html.escape(task.get('target_name', 'Root'))}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Press <b>Download & Upload to Drive</b> below to proceed.</i>",
+            reply_markup=markup,
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if action == "awaiting_folder_name":
